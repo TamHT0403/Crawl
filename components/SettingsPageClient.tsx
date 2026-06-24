@@ -417,10 +417,10 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
         <div className="space-y-4">
       <div className="grid grid-cols-3 gap-3">
         {([
-          { id: "playwright", title: "Playwright", desc: "Crawl local bằng trình duyệt", icon: <Monitor className="h-5 w-5" /> },
           { id: "apify", title: "Apify Cloud", desc: "Crawl qua Apify Actor", icon: <Cloud className="h-5 w-5" /> },
           { id: "social-crawler" as const, title: "Social Crawler", desc: "Third-party crawl service", icon: <Globe className="h-5 w-5" /> },
-        ]).map((p) => (
+          ...(process.env.NODE_ENV !== "production" ? [{ id: "playwright" as const, title: "Playwright", desc: "Crawl local bằng trình duyệt", icon: <Monitor className="h-5 w-5" /> }] : []),
+        ]).map((p: any) => (
           <button key={p.id} onClick={() => update({ activeProvider: p.id })}
             className={cn("relative flex flex-col gap-2 rounded-xl border-2 p-4 text-left transition",
               cfg.activeProvider === p.id ? "border-kolia-green bg-gradient-to-br from-kolia-mint/40 to-white shadow-sm" : "border-kolia-line bg-white hover:border-kolia-green/50")}>
@@ -435,7 +435,11 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
         <h3 className="mb-4 text-xs font-bold uppercase tracking-[0.1em] text-kolia-green">
           {cfg.activeProvider === "playwright" ? "⚙️ Playwright" : cfg.activeProvider === "apify" ? "☁️ Apify" : "🌐 Social Crawler"}
         </h3>
-        {cfg.activeProvider === "playwright" && (
+        {cfg.activeProvider === "playwright" && process.env.NODE_ENV === "production" ? (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-xs text-amber-700">
+            ⛔ Playwright crawl bị vô hiệu trên môi trường production. Vui lòng chọn <strong>Apify Cloud</strong> hoặc <strong>Social Crawler</strong>.
+          </div>
+        ) : cfg.activeProvider === "playwright" && (
           <div className="space-y-4">
             <div className="rounded-lg border border-kolia-line bg-slate-50 p-4">
               <h4 className="mb-2 text-xs font-bold text-kolia-ink">🔄 GraphQL Interception Crawler</h4>

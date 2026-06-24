@@ -33,6 +33,13 @@ export class FacebookAdapter implements CompetitorDataAdapter {
     const providerConfig = context.settings.facebookProvider;
     const provider = providerConfig?.activeProvider ?? "playwright";
 
+    // Chỉ cho phép Playwright/CloakBrowser crawl ở môi trường dev
+    if (provider !== "apify" && provider !== "social-crawler" && process.env.NODE_ENV === "production") {
+      console.log(`[facebook-adapter] ⛔ Playwright crawl bị vô hiệu trên production (${competitor.name})`);
+      context.onLog?.(`⛔ Playwright crawl chỉ được dùng ở môi trường dev. Vui lòng chọn Apify hoặc Social Crawler.`);
+      return [];
+    }
+
     if (provider === "apify") {
       return this.fetchViaApify(competitor, context);
     }

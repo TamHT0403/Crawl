@@ -475,7 +475,9 @@ export async function crawlFacebook(
 
   crawlLog(cfg, `🚀 Bắt đầu crawl Facebook GraphQL: ${channelUrl} (${sourceType})`);
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  const maxAttempts = process.env.CRAWL_TIMEOUT ? 3 : 2;
+  const pageTimeout = Number(process.env.FB_PAGE_TIMEOUT) || 90000;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const { context } = await getOrCreateBrowser(cfg);
       const page = await context.newPage();
@@ -502,7 +504,7 @@ export async function crawlFacebook(
       page.on('response', onResponse);
 
       try {
-        await page.goto(channelUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.goto(channelUrl, { waitUntil: 'domcontentloaded', timeout: pageTimeout });
         await new Promise(r => setTimeout(r, scrollCfg.initialDelayMin + Math.random() * (scrollCfg.initialDelayMax - scrollCfg.initialDelayMin)));
 
         const currentUrl = page.url().toLowerCase();
@@ -594,7 +596,7 @@ export async function crawlFacebook(
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       crawlLog(cfg, `❌ Attempt ${attempt}: ${errMsg}`);
-      if (attempt < 2) { await cleanupBrowser(); await new Promise(r => setTimeout(r, 3000 + Math.random() * 2000)); }
+      if (attempt < maxAttempts) { await cleanupBrowser(); await new Promise(r => setTimeout(r, (3000 + Math.random() * 2000) * attempt)); }
       else return null;
     }
   }
