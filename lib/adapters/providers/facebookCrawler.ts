@@ -32,18 +32,27 @@ async function getOrCreateBrowser(input: FacebookCrawlInput = {}): Promise<{ bro
 
   if (engine === 'cloakbrowser') {
     const { launch } = await import('cloakbrowser');
-    // CloakBrowser uses $HOME/.cloakbrowser — ensure HOME is writable
-    if (!process.env.HOME || process.env.HOME === '/nonexistent') {
-      process.env.HOME = process.cwd();
-    }
+    // CloakBrowser stores its browser binary at $HOME/.cloakbrowser
+    // Use /tmp to avoid EACCES on servers where HOME is read-only
+    process.env.HOME = '/tmp';
     browser = await launch({ headless: true, humanize: true, timezone: 'Asia/Saigon', locale: 'en-US',
       args: ['--no-sandbox', '--disable-web-security', '--no-first-run', '--no-default-browser-check'] });
   } else {
     const opts: Record<string, unknown> = { headless,
       args: ['--disable-blink-features=AutomationControlled','--no-sandbox','--disable-web-security',
         '--no-first-run','--no-default-browser-check','--disable-dev-shm-usage','--disable-infobars','--ignore-certificate-errors'] };
-    if (engine === 'msedge') opts.channel = 'msedge';
-    browser = await chromium.launch(opts);
+    if (engine === 'msedge') {
+      try {
+        opts.channel = 'msedge';
+        browser = await chromium.launch(opts);
+      } catch {
+        crawlLog(input, `⚠️ MS Edge not found, falling back to Chromium`);
+        delete opts.channel;
+        browser = await chromium.launch(opts);
+      }
+    } else {
+      browser = await chromium.launch(opts);
+    }
   }
 
   const ctxOpts: Record<string, unknown> = {
