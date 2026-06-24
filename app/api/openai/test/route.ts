@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { APIError } from "openai";
-import { getOpenAIClient, getOpenAIModel, isOpenAIConfigured } from "@/lib/openai";
+import { getActiveProvider, getProviderList, getAIModel, isAIConfigured, callAI } from "@/lib/openai";
 
 export const runtime = "nodejs";
 
@@ -9,20 +9,23 @@ type RequestBody = {
 };
 
 export async function GET() {
+  const provider = await getActiveProvider();
   return NextResponse.json({
-    configured: await isOpenAIConfigured(),
-    model: await getOpenAIModel(),
+    configured: await isAIConfigured(),
+    provider,
+    providerList: getProviderList(),
+    model: await getAIModel(),
     endpoint: "/api/openai/test",
     method: "POST"
   });
 }
 
 export async function POST(request: Request) {
-  if (!isOpenAIConfigured()) {
+  if (!(await isAIConfigured())) {
     return NextResponse.json(
       {
-        error: "OPENAI_API_KEY chưa được cấu hình.",
-        setup: "Thêm OPENAI_API_KEY vào file .env, sau đó restart dev server."
+        error: "API Key chưa được cấu hình.",
+        setup: "Vào Settings → Config để thêm API Key cho provider đang chọn."
       },
       { status: 400 }
     );
@@ -37,7 +40,7 @@ export async function POST(request: Request) {
 
   const prompt = body.prompt?.trim();
   if (!prompt) {
-    return NextResponse.json({ error: "Vui lòng nhập prompt để kiểm tra OpenAI API." }, { status: 400 });
+    return NextResponse.json({ error: "Vui lòng nhập prompt để kiểm tra AI API." }, { status: 400 });
   }
 
   if (prompt.length > 4000) {
@@ -45,24 +48,23 @@ export async function POST(request: Request) {
   }
 
   try {
-    const client = await getOpenAIClient();
-    const model = await getOpenAIModel();
-    const response = await client.responses.create({
-      model,
-      input: prompt,
-      instructions:
-        "Bạn là chuyên gia phân tích nội dung tài chính cho Kolia Phan. Trả lời bằng tiếng Việt có dấu, rõ ràng, trung lập, không đưa ra khuyến nghị đầu tư cá nhân.",
-      max_output_tokens: 700
-    });
+    const provider = await getActiveProvider();
+    const model = await getAIModel();
+    const outputText = await callAI(
+      [
+        { role: "system", content: "Bạn là chuyên gia phân tích nội dung tài chính cho Kolia Phan. Trả lời bằng tiếng Việt có dấu, rõ ràng, trung lập, không đưa ra khuyến nghị đầu tư cá nhân." },
+        { role: "user", content: prompt },
+      ],
+      { maxTokens: 700, model }
+    );
 
     return NextResponse.json({
       ok: true,
+      provider,
       model,
-      responseId: response.id,
-      outputText: response.output_text,
-      usage: response.usage ?? null
+      outputText,
     });
-  } catch (error) {
+  } catch (error: any) {
     if (error instanceof APIError) {
       return NextResponse.json(
         {
@@ -76,7 +78,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const message = error instanceof Error ? error.message : "OpenAI API request failed.";
+    const message = error instanceof Error ? error.message : "AI API request failed.";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

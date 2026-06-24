@@ -17,7 +17,7 @@ export type ConfigMeta = {
   key: string;
   label: string;
   description: string;
-  category: "google" | "openai" | "facebook" | "tiktok" | "smtp" | "telegram" | "general";
+  category: "google" | "openai" | "facebook" | "tiktok" | "smtp" | "telegram" | "general" | "ai";
   encrypted: boolean;
   isSecret: boolean; // Ẩn giá trị trong UI (show ****)
   envFallback: string | null; // Tên env var để fallback
@@ -31,10 +31,33 @@ export const CONFIG_REGISTRY: ConfigMeta[] = [
   { key: "google_redirect_uri", label: "Google Redirect URI", description: "Callback URL cho OAuth", category: "google", encrypted: false, isSecret: false, envFallback: "GOOGLE_REDIRECT_URI", placeholder: "http://localhost:3000/api/youtube/auth/callback" },
   { key: "youtube_api_key", label: "YouTube API Key", description: "API Key từ Google Cloud Console (YouTube Data API v3)", category: "google", encrypted: true, isSecret: true, envFallback: "YOUTUBE_API_KEY" },
 
+  // ─── AI Provider ────────────────────────────────────────────────
+  { key: "ai_provider", label: "AI Provider", description: "Nhà cung cấp AI API (openai, gemini, groq, openrouter, huggingface)", category: "openai", encrypted: false, isSecret: false, envFallback: "AI_PROVIDER", placeholder: "openai" },
+
   // ─── OpenAI ─────────────────────────────────────────────────────
   { key: "openai_api_key", label: "OpenAI API Key", description: "API Key từ OpenAI dashboard", category: "openai", encrypted: true, isSecret: true, envFallback: "OPENAI_API_KEY" },
   { key: "openai_model", label: "OpenAI Model", description: "Model ID (vd: gpt-5.5, gpt-4o)", category: "openai", encrypted: false, isSecret: false, envFallback: "OPENAI_MODEL", placeholder: "gpt-5.5" },
-  { key: "openai_org_id", label: "OpenAI Organization ID", description: "Organization ID (lấy từ https://platform.openai.com/settings/organization/general). Cần để gọi API usage.", category: "openai", encrypted: false, isSecret: false, envFallback: "OPENAI_ORG_ID", placeholder: "org-xxxxxxxxxxxxxx" },
+  { key: "openai_base_url", label: "OpenAI Base URL", description: "Custom API base URL (nếu dùng proxy)", category: "openai", encrypted: false, isSecret: false, envFallback: "OPENAI_BASE_URL", placeholder: "https://api.openai.com/v1" },
+
+  // ─── Google Gemini ──────────────────────────────────────────────
+  { key: "gemini_api_key", label: "Gemini API Key", description: "API Key từ Google AI Studio (https://aistudio.google.com)", category: "openai", encrypted: true, isSecret: true, envFallback: "GEMINI_API_KEY" },
+  { key: "gemini_model", label: "Gemini Model", description: "Model ID (vd: gemini-2.5-flash, gemini-2.5-pro)", category: "openai", encrypted: false, isSecret: false, envFallback: "GEMINI_MODEL", placeholder: "gemini-2.5-flash" },
+  { key: "gemini_base_url", label: "Gemini Base URL", description: "Custom API base URL (mặc định: https://generativelanguage.googleapis.com/v1beta/openai/)", category: "openai", encrypted: false, isSecret: false, envFallback: null, placeholder: "https://generativelanguage.googleapis.com/v1beta/openai/" },
+
+  // ─── Groq ───────────────────────────────────────────────────────
+  { key: "groq_api_key", label: "Groq API Key", description: "API Key từ Groq Console (https://console.groq.com)", category: "openai", encrypted: true, isSecret: true, envFallback: "GROQ_API_KEY" },
+  { key: "groq_model", label: "Groq Model", description: "Model ID (vd: llama-3.3-70b-versatile, qwen-2.5-32b)", category: "openai", encrypted: false, isSecret: false, envFallback: "GROQ_MODEL", placeholder: "llama-3.3-70b-versatile" },
+  { key: "groq_base_url", label: "Groq Base URL", description: "Custom API base URL (mặc định: https://api.groq.com/openai/v1)", category: "openai", encrypted: false, isSecret: false, envFallback: null, placeholder: "https://api.groq.com/openai/v1" },
+
+  // ─── OpenRouter ─────────────────────────────────────────────────
+  { key: "openrouter_api_key", label: "OpenRouter API Key", description: "API Key từ OpenRouter (https://openrouter.ai/keys)", category: "openai", encrypted: true, isSecret: true, envFallback: "OPENROUTER_API_KEY" },
+  { key: "openrouter_model", label: "OpenRouter Model", description: "Model ID (vd: google/gemini-2.5-flash:free, anthropic/claude-3.5-sonnet:free)", category: "openai", encrypted: false, isSecret: false, envFallback: "OPENROUTER_MODEL", placeholder: "google/gemini-2.5-flash:free" },
+  { key: "openrouter_base_url", label: "OpenRouter Base URL", description: "Custom API base URL (mặc định: https://openrouter.ai/api/v1)", category: "openai", encrypted: false, isSecret: false, envFallback: null, placeholder: "https://openrouter.ai/api/v1" },
+
+  // ─── HuggingFace ────────────────────────────────────────────────
+  { key: "huggingface_api_key", label: "HuggingFace API Key", description: "API Key từ Hugging Face (https://huggingface.co/settings/tokens)", category: "openai", encrypted: true, isSecret: true, envFallback: "HUGGINGFACE_API_KEY" },
+  { key: "huggingface_model", label: "HuggingFace Model", description: "Model ID (vd: mistralai/Mistral-7B-Instruct-v0.3, meta-llama/Llama-3.2-3B-Instruct)", category: "openai", encrypted: false, isSecret: false, envFallback: "HUGGINGFACE_MODEL", placeholder: "mistralai/Mistral-7B-Instruct-v0.3" },
+  { key: "huggingface_base_url", label: "HuggingFace Base URL", description: "Custom API base URL (mặc định: https://api-inference.huggingface.co/v1)", category: "openai", encrypted: false, isSecret: false, envFallback: null, placeholder: "https://api-inference.huggingface.co/v1" },
 
   // ─── Facebook ───────────────────────────────────────────────────
   { key: "fb_email", label: "Facebook Email", description: "Email đăng nhập Facebook (Playwright fallback)", category: "facebook", encrypted: true, isSecret: false, envFallback: "FB_EMAIL" },

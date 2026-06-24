@@ -29,7 +29,7 @@ const TABS: { id: TabId; label: string; icon: React.ComponentType<{ className?: 
 ];
 
 const CAT_ICON: Record<string, string> = { google: "🔑", openai: "🤖", facebook: "📘", tiktok: "🎵", smtp: "📧", telegram: "✈️", general: "⚙️" };
-const CAT_LABEL: Record<string, string> = { google: "Google / YouTube", openai: "OpenAI", facebook: "Facebook", tiktok: "TikTok", smtp: "SMTP", telegram: "Telegram", general: "General" };
+const CAT_LABEL: Record<string, string> = { google: "Google / YouTube", openai: "AI Provider", facebook: "Facebook", tiktok: "TikTok", smtp: "SMTP", telegram: "Telegram", general: "General" };
 const CAT_COLOR: Record<string, string> = { google: "border-blue-200 bg-blue-50/50", openai: "border-emerald-200 bg-emerald-50/50", facebook: "border-indigo-200 bg-indigo-50/50", tiktok: "border-zinc-200 bg-zinc-50/50", smtp: "border-orange-200 bg-orange-50/50", telegram: "border-sky-200 bg-sky-50/50", general: "border-slate-200 bg-slate-50/50" };
 
 const CONFIG_HELP: Record<string, { steps: string[]; url?: string; urlLabel?: string }> = {
@@ -114,11 +114,28 @@ function ApiKeysTab({ onMsg }: { onMsg: (m: any) => void }) {
     fetch("/api/config").then(r => r.json()).then(d => setItems(d.configs ?? [])).finally(() => setLoading(false));
   }, []);
 
+  // AI provider filter: chỉ hiển thị config của provider đang chọn
+  const AI_PROVIDER_KEYS: Record<string, string[]> = {
+    openai: ["openai_api_key", "openai_model", "openai_base_url"],
+    gemini: ["gemini_api_key", "gemini_model", "gemini_base_url"],
+    groq: ["groq_api_key", "groq_model", "groq_base_url"],
+    openrouter: ["openrouter_api_key", "openrouter_model", "openrouter_base_url"],
+    huggingface: ["huggingface_api_key", "huggingface_model", "huggingface_base_url"],
+  };
+  const allProviderKeys = Object.values(AI_PROVIDER_KEYS).flat();
+  const activeAiProvider = items.find(c => c.key === "ai_provider")?.value || "openai";
+  const activeProviderKeys = AI_PROVIDER_KEYS[activeAiProvider] || [];
+
   const grouped = useMemo(() => {
     const g: Record<string, ConfigItem[]> = {};
-    for (const c of items) { if (!g[c.category]) g[c.category] = []; g[c.category].push(c); }
+    for (const c of items) {
+      // Filter: nếu là config riêng của provider không được chọn thì bỏ qua
+      if (allProviderKeys.includes(c.key) && !activeProviderKeys.includes(c.key)) continue;
+      if (!g[c.category]) g[c.category] = [];
+      g[c.category].push(c);
+    }
     return g;
-  }, [items]);
+  }, [items, activeProviderKeys.join(",")]);
 
   const reload = async () => { const d = await fetch("/api/config").then(r => r.json()); setItems(d.configs ?? []); };
 
@@ -149,6 +166,9 @@ function ApiKeysTab({ onMsg }: { onMsg: (m: any) => void }) {
               className="flex w-full items-center gap-2 px-5 py-3 border-b bg-white/80 hover:bg-white transition text-left">
               <span className="text-base">{CAT_ICON[cat] || "⚙️"}</span>
               <span className="text-xs font-bold uppercase tracking-wider text-slate-600 flex-1">{CAT_LABEL[cat] || cat}</span>
+              {cat === "openai" && activeAiProvider ? (
+                <span className="text-[10px] font-semibold text-kolia-green mr-2">({({ openai: "OpenAI", gemini: "Gemini", groq: "Groq", openrouter: "OpenRouter", huggingface: "HuggingFace" } as Record<string, string>)[activeAiProvider] || activeAiProvider})</span>
+              ) : null}
               <span className="text-xs text-slate-400">{configs.filter(c => !c.hasValue).length} thiếu</span>
               <svg className={cn("h-4 w-4 text-slate-400 transition-transform", isCollapsed ? "" : "rotate-180")} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg>
             </button>
@@ -188,13 +208,30 @@ function ApiKeysTab({ onMsg }: { onMsg: (m: any) => void }) {
                           <div className="min-w-0">
                             {isEditing ? (
                               <div className="flex items-center gap-1">
-                                <input type={item.isSecret && !isVisible ? "password" : "text"} value={editVal}
-                                  onChange={(e) => setEditVal(e.target.value)}
-                                  className="h-8 flex-1 rounded-lg border border-kolia-line px-3 text-sm outline-none focus:border-kolia-green focus:ring-2 focus:ring-kolia-mint w-full" autoFocus />
+                                {item.key === "ai_provider" ? (
+                                  <select value={editVal} onChange={(e) => setEditVal(e.target.value)}
+                                    className="h-8 flex-1 rounded-lg border border-kolia-line px-3 text-sm outline-none focus:border-kolia-green focus:ring-2 focus:ring-kolia-mint w-full" autoFocus>
+                                    <option value="openai">OpenAI</option>
+                                    <option value="gemini">Google Gemini</option>
+                                    <option value="groq">Groq</option>
+                                    <option value="openrouter">OpenRouter</option>
+                                    <option value="huggingface">HuggingFace</option>
+                                  </select>
+                                ) : (
+                                  <input type={item.isSecret && !isVisible ? "password" : "text"} value={editVal}
+                                    onChange={(e) => setEditVal(e.target.value)}
+                                    className="h-8 flex-1 rounded-lg border border-kolia-line px-3 text-sm outline-none focus:border-kolia-green focus:ring-2 focus:ring-kolia-mint w-full" autoFocus />
+                                )}
                               </div>
                             ) : (
                               <p className="text-sm font-mono text-slate-500 truncate">
-                                {item.hasValue ? (item.isSecret ? (isVisible ? item.value : "••••••••••••") : item.value) : <span className="italic text-slate-400">Chưa cấu hình</span>}
+                                {item.hasValue
+                                  ? (item.isSecret
+                                    ? (isVisible ? item.value : "••••••••••••")
+                                    : (item.key === "ai_provider"
+                                      ? (({ openai: "OpenAI", gemini: "Google Gemini", groq: "Groq", openrouter: "OpenRouter", huggingface: "HuggingFace" } as Record<string, string>)[item.value ?? ""] || item.value)
+                                      : item.value))
+                                  : <span className="italic text-slate-400">Chưa cấu hình</span>}
                               </p>
                             )}
                           </div>

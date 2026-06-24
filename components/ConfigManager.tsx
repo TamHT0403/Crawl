@@ -18,7 +18,7 @@ type ConfigItem = {
 
 const CATEGORY_LABELS: Record<string, string> = {
   google: "🔑 Google / YouTube",
-  openai: "🤖 OpenAI",
+  openai: "🤖 AI Provider (OpenAI / Gemini / Groq...)",
   facebook: "📘 Facebook",
   tiktok: "🎵 TikTok",
   smtp: "📧 SMTP (Email)",
@@ -85,6 +85,97 @@ const CONFIG_HELP: Record<string, { steps: string[]; url?: string; urlLabel?: st
     ],
     url: "https://platform.openai.com/docs/models",
     urlLabel: "OpenAI Models",
+  },
+  openai_base_url: {
+    steps: [
+      "Để trống nếu dùng API mặc định của OpenAI",
+      "Chỉ điền nếu bạn dùng proxy hoặc API trung gian",
+      "VD: https://my-proxy.example.com/v1",
+    ],
+  },
+
+  // ─── Gemini ──────────────────────────────────────────────────────
+  gemini_api_key: {
+    steps: [
+      "Truy cập https://aistudio.google.com/apikey",
+      "Nhấn Create API Key (miễn phí, không cần thẻ)",
+      "Copy key và dán vào ô bên cạnh",
+      "Gemini có free tier với rate limit cao",
+    ],
+    url: "https://aistudio.google.com/apikey",
+    urlLabel: "Google AI Studio",
+  },
+  gemini_model: {
+    steps: [
+      "Mặc định: gemini-2.5-flash (nhanh, free)",
+      "Các model khác: gemini-2.5-pro, gemini-2.0-flash",
+      "Xem danh sách: https://ai.google.dev/gemini-api/docs/models",
+    ],
+    url: "https://ai.google.dev/gemini-api/docs/models",
+    urlLabel: "Gemini Models",
+  },
+
+  // ─── Groq ────────────────────────────────────────────────────────
+  groq_api_key: {
+    steps: [
+      "Truy cập https://console.groq.com/keys",
+      "Đăng nhập (Google/GitHub), vào API Keys",
+      "Nhấn Create API Key, copy và dán vào ô bên cạnh",
+      "Groq miễn phí, tốc độ rất nhanh (LPU inference)",
+    ],
+    url: "https://console.groq.com/keys",
+    urlLabel: "Groq Console",
+  },
+  groq_model: {
+    steps: [
+      "Mặc định: llama-3.3-70b-versatile",
+      "Các model khác: qwen-2.5-32b, mixtral-8x7b-32768",
+      "Xem danh sách: https://console.groq.com/docs/models",
+    ],
+    url: "https://console.groq.com/docs/models",
+    urlLabel: "Groq Models",
+  },
+
+  // ─── OpenRouter ──────────────────────────────────────────────────
+  openrouter_api_key: {
+    steps: [
+      "Truy cập https://openrouter.ai/keys",
+      "Đăng nhập → Keys → Create Key",
+      "Copy key và dán vào ô bên cạnh",
+      "Dùng 1 key cho nhiều model (OpenAI, Claude, Gemini...)",
+    ],
+    url: "https://openrouter.ai/keys",
+    urlLabel: "OpenRouter Keys",
+  },
+  openrouter_model: {
+    steps: [
+      "Mặc định: google/gemini-2.5-flash:free (miễn phí)",
+      "Các model free: anthropic/claude-3.5-sonnet:free, meta-llama/llama-3.2-3b-instruct:free",
+      "Xem danh sách: https://openrouter.ai/models",
+    ],
+    url: "https://openrouter.ai/models",
+    urlLabel: "OpenRouter Models",
+  },
+
+  // ─── HuggingFace ─────────────────────────────────────────────────
+  huggingface_api_key: {
+    steps: [
+      "Truy cập https://huggingface.co/settings/tokens",
+      "Đăng nhập → Settings → Access Tokens → New Token",
+      "Chọn role read, copy token và dán vào ô bên cạnh",
+      "Hàng nghìn model open-source miễn phí",
+    ],
+    url: "https://huggingface.co/settings/tokens",
+    urlLabel: "HuggingFace Tokens",
+  },
+  huggingface_model: {
+    steps: [
+      "Mặc định: mistralai/Mistral-7B-Instruct-v0.3",
+      "Tìm model: https://huggingface.co/models?pipeline_tag=text-generation&sort=trending",
+      "Dùng định dạng: organization/model-name",
+    ],
+    url: "https://huggingface.co/models",
+    urlLabel: "HuggingFace Models",
   },
   fb_email: {
     steps: [
@@ -232,7 +323,28 @@ export function ConfigManager() {
     });
   };
 
+  // Providers map để hiển thị dropdown + lọc
+  const AI_PROVIDERS = [
+    { id: "openai", label: "OpenAI" },
+    { id: "gemini", label: "Google Gemini" },
+    { id: "groq", label: "Groq" },
+    { id: "openrouter", label: "OpenRouter" },
+    { id: "huggingface", label: "HuggingFace" },
+  ];
+  const providerConfigMap: Record<string, string[]> = {
+    openai: ["openai_api_key", "openai_model", "openai_base_url"],
+    gemini: ["gemini_api_key", "gemini_model", "gemini_base_url"],
+    groq: ["groq_api_key", "groq_model", "groq_base_url"],
+    openrouter: ["openrouter_api_key", "openrouter_model", "openrouter_base_url"],
+    huggingface: ["huggingface_api_key", "huggingface_model", "huggingface_base_url"],
+  };
+
+  const activeAiProvider = configs.find(c => c.key === "ai_provider")?.value || "openai";
+  const activeProviderKeys = providerConfigMap[activeAiProvider] || [];
+
   const grouped = configs.reduce<Record<string, ConfigItem[]>>((acc, c) => {
+    const isProviderSpecific = Object.values(providerConfigMap).some(keys => keys.includes(c.key));
+    if (isProviderSpecific && !activeProviderKeys.includes(c.key)) return acc;
     acc[c.category] = acc[c.category] ?? [];
     acc[c.category].push(c);
     return acc;
@@ -252,6 +364,12 @@ export function ConfigManager() {
       {Object.entries(grouped).map(([category, items]) => (
         <section key={category} className="rounded border border-kolia-line bg-white p-5 shadow-sm">
           <h2 className="font-bold text-kolia-ink">{CATEGORY_LABELS[category] || category}</h2>
+          {category === "openai" && (
+            <p className="mt-1 text-xs text-slate-400">
+              Provider hiện tại: <strong className="text-kolia-ink">{activeAiProvider}</strong>
+              &nbsp;— chỉ hiển thị config của provider đang dùng.
+            </p>
+          )}
           <div className="mt-4 space-y-3">
             {items.map((item) => {
               const isEditing = editingKey === item.key;
@@ -278,15 +396,28 @@ export function ConfigManager() {
 
                       {isEditing ? (
                         <div className="mt-2 flex items-center gap-2">
-                          <input
-                            type={item.isSecret && !isVisible ? "password" : "text"}
-                            value={editValue}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            placeholder={item.placeholder ?? "Nhập giá trị..."}
-                            className="min-w-0 flex-1 rounded border px-3 py-1.5 text-sm"
-                            autoFocus
-                          />
-                          {item.isSecret && (
+                          {item.key === "ai_provider" ? (
+                            <select
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              className="min-w-0 flex-1 rounded border px-3 py-1.5 text-sm"
+                              autoFocus
+                            >
+                              {AI_PROVIDERS.map(p => (
+                                <option key={p.id} value={p.id}>{p.label}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              type={item.isSecret && !isVisible ? "password" : "text"}
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              placeholder={item.placeholder ?? "Nhập giá trị..."}
+                              className="min-w-0 flex-1 rounded border px-3 py-1.5 text-sm"
+                              autoFocus
+                            />
+                          )}
+                          {item.isSecret && item.key !== "ai_provider" && (
                             <button onClick={() => setShowSecret(isVisible ? null : item.key)} className="text-slate-400 hover:text-slate-600">
                               {isVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                             </button>
@@ -303,7 +434,9 @@ export function ConfigManager() {
                           {item.hasValue
                             ? (item.isSecret
                               ? (isVisible ? item.value : "••••••••")
-                              : item.value)
+                              : (item.key === "ai_provider"
+                                ? (AI_PROVIDERS.find(p => p.id === item.value)?.label || item.value)
+                                : item.value))
                             : <span className="text-slate-400 italic">Chưa cấu hình</span>
                             }
                         </p>
