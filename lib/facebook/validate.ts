@@ -1,20 +1,7 @@
 /**
- * Validate Facebook session cookies bằng Playwright headless check.
+ * Validate Facebook session cookies bằng HTTP request (không cần Playwright browser).
  * Chấp nhận cả Playwright storageState format và flat cookies array (EditThisCookie).
  */
-
-import { chromium } from "playwright";
-import { getSettingWithFallback } from "@/lib/settings";
-
-const FB_BASE_URL_FALLBACK = "https://www.facebook.com";
-
-let _fbBaseUrl: string | null = null;
-
-async function getFbBaseUrl(): Promise<string> {
-  if (_fbBaseUrl) return _fbBaseUrl;
-  _fbBaseUrl = await getSettingWithFallback("facebookBaseUrl", FB_BASE_URL_FALLBACK);
-  return _fbBaseUrl;
-}
 
 export type SessionValidation = {
   ok: boolean;
@@ -85,10 +72,58 @@ function normalizeSameSite(sameSite: string | null): "Lax" | "Strict" | "None" {
   return "None";
 }
 
+/**
+ * Gọi HTTP request đến Facebook Home để kiểm tra cookies có hiệu lực không.
+ * Không cần Playwright browser — nhẹ, nhanh, chạy được trên mọi môi trường.
+ */
+async function checkSessionViaHttp(
+  cookies: { name: string; value: string; domain: string }[],
+): Promise<{ ok: boolean; userId?: string; userName?: string }> {
+  // Build cookie string từ Facebook cookies (chỉ lấy .facebook.com domain)
+  const fbCookies = cookies.filter(c =>
+    c.domain.includes('facebook.com') || c.domain.includes('.facebook.com')
+  );
+  const cookieStr = fbCookies.map(c => `${c.name}=${c.value}`).join('; ');
+
+  const res = await fetch('https://www.facebook.com/', {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Cookie': cookieStr,
+      'Accept': 'text/html,application/xhtml+xml',
+      'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+    },
+    redirect: 'manual', // Không tự follow redirect — kiểm tra response location
+  });
+
+  const status = res.status;
+  const location = res.headers.get('location') || '';
+  const body = await res.text();
+  const bodyLower = body.toLowerCase();
+
+  // Nếu redirect đến login → cookies hết hạn
+  if (status >= 300 && status < 400 && location.includes('login')) {
+    return { ok: false };
+  }
+
+  // Nếu response có login form → cookies hết hạn
+  if (bodyLower.includes('input name="email"') || bodyLower.includes('input id="email"') || bodyLower.includes('login_form')) {
+    return { ok: false };
+  }
+
+  // Thành công: thử lấy user_id từ response
+  const userIdMatch = body.match(/"userID"\s*:\s*"(\d+)"/) || body.match(/"USER_ID"\s*:\s*"(\d+)"/);
+  const userNameMatch = body.match(/"name"\s*:\s*"([^"]+)"/);
+
+  return {
+    ok: true,
+    userId: userIdMatch?.[1],
+    userName: userNameMatch?.[1],
+  };
+}
+
 export async function validateFacebookSession(
   sessionJson: string,
 ): Promise<SessionValidation> {
-  let browser;
   try {
     const parsed = JSON.parse(sessionJson);
 
@@ -99,8 +134,7 @@ export async function validateFacebookSession(
     } catch {
       return {
         ok: false,
-        message:
-          "❌ Không nhận dạng được định dạng cookies. Vui lòng export theo hướng dẫn.",
+        message: "❌ Không nhận dạng được định dạng cookies. Vui lòng export theo hướng dẫn.",
       };
     }
 
@@ -111,69 +145,35 @@ export async function validateFacebookSession(
       };
     }
 
-    // Launch headless check
-    browser = await chromium.launch({
-      headless: true,
-      args: ["--no-sandbox"],
-    });
+    // Kiểm tra cookies quan trọng: c_user + xs là tối thiểu
+    const cookieNames = storageState.cookies.map(c => c.name);
+    const hasCUser = cookieNames.includes("c_user");
+    const hasXs = cookieNames.includes("xs");
 
-    const context = await browser.newContext({ storageState });
-    const page = await context.newPage();
+    if (!hasCUser || !hasXs) {
+      return {
+        ok: false,
+        message: `❌ Thiếu cookies cần thiết (c_user=${hasCUser}, xs=${hasXs}). Vui lòng export lại cookies.`,
+      };
+    }
 
-    const fbBaseUrl = await getFbBaseUrl();
-    await page.goto(fbBaseUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: 20000,
-    });
-    await page.waitForTimeout(3000);
+    // Kiểm tra thực tế bằng HTTP request đến Facebook
+    const result = await checkSessionViaHttp(storageState.cookies);
 
-    // Check if logged in via c_user cookie (Node.js context)
-    const cookies = await context.cookies(fbBaseUrl);
-    const hasCUser = cookies.some((c) => c.name === "c_user" && Boolean(c.value));
-
-    // Check page for login indicators (browser context)
-    const pageLoggedIn = await page.evaluate(() => {
-      const hasLoginForm = !!document.querySelector(
-        'input[name="email"], input#email',
-      );
-      const url = window.location.href;
-      const isOnLoginPage =
-        url.includes("/login") ||
-        url.includes("checkpoint") ||
-        url.includes("logout");
-      const hasHomeElements = !!document.querySelector(
-        '[aria-label="Your profile"], [aria-label="Trang cá nhân của bạn"], [aria-label="Home"], [aria-label="Trang chủ"]',
-      );
-      return hasHomeElements && !isOnLoginPage && !hasLoginForm;
-    });
-
-    await context.close();
-
-    // Kết hợp cả hai checks: c_user cookie (ưu tiên) + page elements
-    const isLoggedIn = hasCUser || pageLoggedIn;
-
-    if (isLoggedIn) {
+    if (result.ok) {
+      const userInfo = result.userId ? ` (uid: ${result.userId}${result.userName ? `, ${result.userName}` : ''})` : '';
       return {
         ok: true,
-        message: `✅ Session Facebook hợp lệ (${storageState.cookies.length} cookies) — có thể crawl dữ liệu`,
+        message: `✅ Session Facebook hợp lệ — ${storageState.cookies.length} cookies${userInfo}`,
       };
     }
 
     return {
       ok: false,
-      message:
-        "❌ Session hết hạn hoặc không hợp lệ — vui lòng export lại từ browser",
+      message: "❌ Cookies đã hết hạn — vui lòng export lại cookies mới từ browser",
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, message: `❌ Lỗi validate: ${msg}` };
-  } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch {
-        /* ignore */
-      }
-    }
   }
 }
