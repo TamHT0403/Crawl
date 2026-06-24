@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: crawl-engine
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: singapore
+    plan: standard
+    preDeployCommand: "npx prisma migrate deploy"
+    envVars:
+      - key: DATABASE_URL
+        value: postgresql://crawlengine:JnMUz4r1DS6599buIvf06qVvQMdvpkyN@dpg-d8tkg23eo5us73bj1peg-a.singapore-postgres.render.com/crawlengine
+      - key: NODE_ENV
+        value: production
+      - key: CHROME_EXECUTABLE_PATH
+        value: /usr/bin/chromium
+      - key: PUPPETEER_SKIP_DOWNLOAD
+        value: "true"
+      - key: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD
+        value: "1"
+      - key: ENCRYPTION_KEY
+        generateValue: true

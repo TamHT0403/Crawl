@@ -1,0 +1,234 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Competitor {
+  id               String   @id @default(cuid())
+  name             String
+  platform         String
+  source           String
+  segmentation     String?
+  category         String
+  topicDescription String?
+  channelUrl       String
+  avatarUrl        String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  posts            Post[]
+
+  @@index([platform])
+  @@index([source])
+}
+
+model Post {
+  id             String     @id @default(cuid())
+  competitorId   String
+  competitor     Competitor @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+  platform       String
+  postUrl        String
+  title          String
+  caption        String
+  transcript     String?
+  publishedAt    DateTime
+  thumbnailUrl   String?
+  format         String
+  contentPillar  String
+  promotionType  String
+  toneOfVoice    String
+  hookType       String
+  mainTopic      String
+  views          Int        @default(0)
+  likes          Int        @default(0)
+  comments       Int        @default(0)
+  shares         Int        @default(0)
+  engagementRate Float      @default(0)
+  viralityScore  Float      @default(0)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  @@index([platform])
+  @@index([contentPillar])
+  @@index([publishedAt])
+}
+
+model InsightReport {
+  id                    String   @id @default(cuid())
+  platform              String
+  periodStart           DateTime
+  periodEnd             DateTime
+  summary               String
+  topFormats            String
+  topTopics             String
+  contentGaps           String
+  suggestedContentLines String
+  suggestedPrograms     String
+  createdAt             DateTime @default(now())
+}
+
+model TikTokAccount {
+  id            String    @id @default(cuid())
+  label         String
+  sessionData   String    // Mã hoá JSON session/storage state
+  isDefault     Boolean   @default(false)
+  isValid       Boolean   @default(false)
+  lastValidated DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model FacebookAccount {
+  id            String    @id @default(cuid())
+  label         String
+  sessionData   String    // Mã hoá JSON session/storage state (cookies từ Playwright)
+  isDefault     Boolean   @default(false)
+  isValid       Boolean   @default(false)
+  lastValidated DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model GeneratedContent {
+  id            String    @id @default(cuid())
+  platform      String    // youtube | tiktok | facebook
+  contentType   String    // script | post | carousel | caption
+  title         String
+  script        String    // Nội dung kịch bản/content đầy đủ
+  feedbackNotes String?   // Góp ý sửa đổi của Admin nếu chưa duyệt bài
+  thumbnailIdea String?
+  cta           String?
+  toneOfVoice   String
+  mainTopic     String
+  sourceGap     String?   // JSON: content gap IDs đã dùng
+  sourcePosts   String?   // JSON: post IDs tham khảo
+  status        String    @default("draft") // draft | approved | scheduled | published | archived
+  scheduledAt   DateTime? // Lịch đăng bài (dùng cho Content Calendar)
+  publishAt     DateTime? // Thời gian đăng thực tế
+  publishedUrl  String?   // URL sau khi đã publish (YouTube, FB, TikTok)
+  predictedViews Int?     // AI dự đoán views
+  predictedEngagement Float? // AI dự đoán engagement rate
+  generatedById String?   // Sync run ID hoặc user ID
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([platform])
+  @@index([status])
+  @@index([mainTopic])
+  @@index([scheduledAt])
+}
+
+model Team {
+  id        String        @id @default(cuid())
+  name      String
+  slug      String        @unique
+  settings  String?       // JSON: team-level config
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  members   TeamMember[]
+  apiKeys   ApiKey[]
+}
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  email     String
+  name      String?
+  role      String   @default("editor") // admin | editor | viewer
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([teamId, email])
+  @@index([teamId])
+}
+
+model ApiKey {
+  id        String   @id @default(cuid())
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  label     String   // Tên gợi nhớ
+  key       String   @unique // API key hash
+  scopes    String   @default("read") // read | write | admin
+  lastUsedAt DateTime?
+  expiresAt DateTime?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([teamId])
+  @@index([key])
+}
+
+model Webhook {
+  id        String   @id @default(cuid())
+  teamId    String
+  url       String   // Webhook destination URL
+  events    String   // JSON array: ["sync.completed", "content.generated", "alert.performance"]
+  isActive  Boolean  @default(true)
+  lastTriggedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([teamId])
+}
+
+model Alert {
+  id        String   @id @default(cuid())
+  teamId    String
+  channel   String   // slack | email | telegram
+  config    String   // JSON: channel-specific config (webhook URL, email, chat ID)
+  events    String   // JSON array: ["sync.failed", "content.generated", "crawl.error", "performance.alert"]
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([teamId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  teamId    String?
+  action    String   // "sync.run" | "content.create" | "content.publish" | "member.invite" | "settings.update"
+  entity    String?  // "competitor" | "content" | "team" | "setting"
+  entityId  String?
+  metadata  String?  // JSON: additional context
+  createdAt DateTime @default(now())
+
+  @@index([teamId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+/// Lưu cấu hình provider crawl cho từng platform.
+/// Mỗi platform (facebook/tiktok) có thể có nhiều provider config,
+/// nhưng chỉ một activeProvider được dùng khi sync.
+model PlatformProviderConfig {
+  id             String   @id @default(cuid())
+  /// "facebook" | "tiktok"
+  platform       String
+  /// Provider đang active cho platform này: "playwright" | "apify" | "social-crawler"
+  activeProvider String   @default("playwright")
+  /// JSON: PlaywrightProviderConfig
+  playwrightConfig String @default("{}")
+  /// JSON: ApifyProviderConfig
+  apifyConfig    String   @default("{}")
+  /// JSON: SocialCrawlerProviderConfig
+  socialCrawlerConfig String @default("{}")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([platform])
+  @@index([platform])
+}
