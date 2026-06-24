@@ -32,6 +32,10 @@ async function getOrCreateBrowser(input: FacebookCrawlInput = {}): Promise<{ bro
 
   if (engine === 'cloakbrowser') {
     const { launch } = await import('cloakbrowser');
+    // CloakBrowser uses $HOME/.cloakbrowser — ensure HOME is writable
+    if (!process.env.HOME || process.env.HOME === '/nonexistent') {
+      process.env.HOME = process.cwd();
+    }
     browser = await launch({ headless: true, humanize: true, timezone: 'Asia/Saigon', locale: 'en-US',
       args: ['--no-sandbox', '--disable-web-security', '--no-first-run', '--no-default-browser-check'] });
   } else {

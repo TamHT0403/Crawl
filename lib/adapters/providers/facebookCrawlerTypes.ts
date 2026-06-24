@@ -66,6 +66,8 @@ export interface FacebookCrawlInput {
   endDate?: string;
   scrollConfig?: Partial<FacebookScrollConfig>;
   onLog?: (message: string) => void;
+  /** Custom directory for CloakBrowser user data (default: ./.cloakbrowser) */
+  cloakDir?: string;
 }
 
 // ─── Crawl Output (GraphQL-extracted) ─────────────────────────────────────
