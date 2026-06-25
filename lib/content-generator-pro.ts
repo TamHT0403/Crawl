@@ -36,6 +36,7 @@ export type StepResult = {
   step: 1 | 2 | 3;
   stepName: string;
   output: string;
+  prompt: string;
   durationMs: number;
 };
 
@@ -367,7 +368,7 @@ async function stepResearch(
   mainTopic: string,
   marketContext: string,
   ctx: Awaited<ReturnType<typeof buildProContext>>,
-): Promise<string> {
+): Promise<{ prompt: string; output: string }> {
   const systemInstruction = `Bạn là Data Analyst chuyên phân tích nội dung đối thủ trong lĩnh vực tài chính.
 
 NHIỆM VỤ: Phân tích toàn bộ dữ liệu đối thủ được cung cấp và tạo báo cáo nghiên cứu chi tiết phục vụ cho việc sản xuất nội dung.
@@ -437,7 +438,7 @@ Hãy phân tích và viết báo cáo nghiên cứu với các phần sau:
     max_output_tokens: 2000,
   });
 
-  return response.output_text;
+  return { prompt: `🧠 System Instruction:\n${systemInstruction}\n\n📝 User Prompt:\n${prompt}`, output: response.output_text };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -452,7 +453,7 @@ async function stepOutline(
   marketContext: string,
   researchBrief: string,
   ctx: Awaited<ReturnType<typeof buildProContext>>,
-): Promise<{ raw: string; parsed: Record<string, unknown> }> {
+): Promise<{ raw: string; parsed: Record<string, unknown>; prompt: string }> {
   const structureTemplate = PLATFORM_STRUCTURES[platform];
 
   const systemInstruction = `Bạn là Creative Director chuyên thiết kế cấu trúc nội dung viral cho kênh tài chính.
@@ -518,7 +519,7 @@ YÊU CẦU: Trả về JSON với cấu trúc sau:
 
   const raw = response.output_text;
   const parsed = safeParseJSON(raw) || {};
-  return { raw, parsed };
+  return { raw, parsed, prompt: `🧠 System Instruction:\n${systemInstruction}\n\n📝 User Prompt:\n${prompt}` };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -535,7 +536,7 @@ async function stepDraftAndPolish(
   outlineRaw: string,
   realMarketContext: string,
   ctx: Awaited<ReturnType<typeof buildProContext>>,
-): Promise<{ script: string; metrics: Record<string, unknown> }> {
+): Promise<{ script: string; metrics: Record<string, unknown>; prompt: string }> {
   // Use platform-specific PRO_SYSTEM_INSTRUCTIONS + quality assessment role
   const systemInstruction = PRO_SYSTEM_INSTRUCTIONS[platform] + `
 
@@ -620,6 +621,8 @@ Rồi viết JSON (không markdown code block):
 
 Bắt đầu viết kịch bản:`;
 
+  const fullPrompt = `🧠 System Instruction:\n${systemInstruction}\n\n📝 User Prompt:\n${prompt}`;
+
   const response = await client.responses.create({
     model,
     input: prompt,
@@ -654,7 +657,147 @@ Bắt đầu viết kịch bản:`;
     }
   }
 
-  return { script, metrics };
+  return { script, metrics, prompt: fullPrompt };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  EXPORTED HELPERS — for manual step execution
+// ═══════════════════════════════════════════════════════════════════════════
+
+export { buildProContext };
+
+export type StepInput = {
+  step: 1 | 2 | 3;
+  platform: Platform;
+  mainTopic: string;
+  marketContext?: string;
+  marketSnapshot?: MarketSnapshot;
+  // For step 2 & 3: context from previous steps
+  researchBrief?: string;
+  outlineRaw?: string;
+  outlineJSON?: Record<string, unknown>;
+  // Prompt override (user-edited)
+  overriddenSystemInstruction?: string;
+  overriddenUserPrompt?: string;
+};
+
+export async function executeStep(
+  input: StepInput,
+): Promise<StepResult & { output: string; parsed?: Record<string, unknown> }> {
+  if (!await isOpenAIConfigured()) {
+    throw new Error("OpenAI chưa được cấu hình. Vào Settings để thêm API key.");
+  }
+
+  const client = await getOpenAIClient();
+  const model = await getOpenAIModel();
+  const startTime = Date.now();
+
+  // ─── Fetch real-time market data ──────────────────────────────────────
+  let snapshot = input.marketSnapshot;
+  if (!snapshot) {
+    try { snapshot = await fetchMarketSnapshot(); } catch { /* fallback */ }
+  }
+  const realMarketContext = snapshot
+    ? formatMarketContext(snapshot)
+    : "(Không có dữ liệu thị trường real-time)";
+  const combinedMarketContext = [
+    realMarketContext,
+    input.marketContext ? `\nBỔ SUNG TỪ NGƯỜI DÙNG:\n${input.marketContext}` : "",
+  ].filter(Boolean).join("\n");
+
+  // ─── Gather context ───────────────────────────────────────────────────
+  const ctx = await buildProContext(input.platform);
+
+  let output = "";
+  let parsed: Record<string, unknown> | undefined;
+  let stepName = "";
+  let prompt = "";
+
+  switch (input.step) {
+    case 1: {
+      stepName = "Nghiên cứu đối thủ";
+      const result = await stepResearch(
+        client, model, input.platform, input.mainTopic, combinedMarketContext, ctx
+      );
+      output = result.output;
+      prompt = result.prompt;
+
+      // If user overrides the prompt, re-run with edited prompt
+      if (input.overriddenUserPrompt) {
+        const sysInst = input.overriddenSystemInstruction || `Bạn là Data Analyst chuyên phân tích nội dung đối thủ trong lĩnh vực tài chính.\n\nNHIỆM VỤ: Phân tích toàn bộ dữ liệu đối thủ được cung cấp và tạo báo cáo nghiên cứu chi tiết phục vụ cho việc sản xuất nội dung.\n\nYÊU CẦU ĐẦU RA:\n- Viết báo cáo nghiên cứu dạng văn bản có cấu trúc (KHÔNG phải JSON)\n- Sử dụng tiếng Việt có dấu chuẩn\n- Mỗi nhận định phải có số liệu hoặc dẫn chứng cụ thể từ dữ liệu\n- Tập trung vào actionable insights cho nền tảng ${input.platform.toUpperCase()}`;
+        const overrideResp = await client.responses.create({
+          model,
+          input: input.overriddenUserPrompt,
+          instructions: sysInst,
+          max_output_tokens: 2000,
+        });
+        output = overrideResp.output_text;
+        prompt = `🧠 System Instruction:\n${sysInst}\n\n📝 User Prompt (edited):\n${input.overriddenUserPrompt}`;
+      }
+      break;
+    }
+    case 2: {
+      stepName = "Thiết kế cấu trúc";
+      const brief = input.researchBrief || "";
+      const result = await stepOutline(
+        client, model, input.platform, input.mainTopic, combinedMarketContext, brief, ctx
+      );
+      output = result.raw;
+      parsed = result.parsed;
+      prompt = result.prompt;
+
+      if (input.overriddenUserPrompt) {
+        const structureTemplate = PLATFORM_STRUCTURES[input.platform];
+        const sysInst = input.overriddenSystemInstruction || `Bạn là Creative Director chuyên thiết kế cấu trúc nội dung viral cho kênh tài chính.\n\nNHIỆM VỤ: Dựa trên báo cáo nghiên cứu đối thủ và template cấu trúc nền tảng, thiết kế outline chi tiết cho 1 nội dung ${PLATFORM_FORMAT_DESC[input.platform]}.\n\nYÊU CẦU:\n- CẤM TUYỆT ĐỐI lấy nguyên văn câu mô tả chủ đề/lỗ hổng để làm tiêu đề chính.\n- Outline phải tận dụng insights từ nghiên cứu đối thủ\n- Hook phải viết word-for-word (không chung chung)\n- Mỗi section phải có key points cụ thể\n- Emotional arc phải rõ ràng\n- Trả lời bằng JSON hợp lệ, KHÔNG có markdown code block`;
+        const overrideResp = await client.responses.create({
+          model,
+          input: input.overriddenUserPrompt,
+          instructions: sysInst,
+          max_output_tokens: 2000,
+        });
+        output = overrideResp.output_text;
+        parsed = safeParseJSON(output) || {};
+        prompt = `🧠 System Instruction:\n${sysInst}\n\n📝 User Prompt (edited):\n${input.overriddenUserPrompt}`;
+      }
+      break;
+    }
+    case 3: {
+      stepName = "Viết kịch bản & đánh giá";
+      const brief = input.researchBrief || "";
+      const outlineJSON = input.outlineJSON || {};
+      const outlineRaw = input.outlineRaw || "";
+      const result = await stepDraftAndPolish(
+        client, model, input.platform, input.mainTopic, brief,
+        outlineJSON, outlineRaw, realMarketContext, ctx
+      );
+      output = result.script;
+      prompt = result.prompt;
+
+      if (input.overriddenUserPrompt) {
+        const sysInst = input.overriddenSystemInstruction || PRO_SYSTEM_INSTRUCTIONS[input.platform] + `\n\nNHIỆM VỤ: Viết kịch bản hoàn chỉnh sẵn sàng sản xuất, sau đó TỰ ĐÁNH GIÁ chất lượng.\n\nQUY TẮC VIẾT KỊCH BẢN:\n- Viết word-for-word — đây là lời thoại thực tế, KHÔNG phải tóm tắt\n- Thêm [TIMESTAMP] markers cho từng đoạn\n- Thêm [VISUAL] cues cho editor\n- Thêm [B-ROLL] suggestions\n- Mọi số liệu phải dùng DỮ LIỆU THỊ TRƯỜNG REAL-TIME\n- Giọng văn tự nhiên\n- Kết thúc LUÔN có lưu ý rủi ro (disclaimer)\n\nSAU KHI VIẾT XONG, thêm dòng ---QUALITY_METRICS--- rồi viết JSON đánh giá.`;
+        const overrideResp = await client.responses.create({
+          model,
+          input: input.overriddenUserPrompt,
+          instructions: sysInst,
+          max_output_tokens: 6000,
+        });
+        output = overrideResp.output_text;
+        prompt = `🧠 System Instruction:\n${sysInst}\n\n📝 User Prompt (edited):\n${input.overriddenUserPrompt}`;
+      }
+      break;
+    }
+  }
+
+  const durationMs = Date.now() - startTime;
+
+  return {
+    step: input.step,
+    stepName,
+    output,
+    prompt,
+    parsed,
+    durationMs,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -699,15 +842,17 @@ export async function generateProContent(options: {
 
   // ─── STEP 1: RESEARCH ────────────────────────────────────────────────
   const step1Start = Date.now();
-  const researchBrief = await stepResearch(
+  const step1Result = await stepResearch(
     client, model, options.platform, mainTopic, combinedMarketContext, ctx
   );
   const step1Duration = Date.now() - step1Start;
+  const researchBrief = step1Result.output;
 
   options.onStepComplete?.({
     step: 1,
     stepName: "Nghiên cứu đối thủ",
     output: researchBrief,
+    prompt: step1Result.prompt,
     durationMs: step1Duration,
   });
 
@@ -722,6 +867,7 @@ export async function generateProContent(options: {
     step: 2,
     stepName: "Thiết kế cấu trúc",
     output: outlineResult.raw,
+    prompt: outlineResult.prompt,
     durationMs: step2Duration,
   });
 
@@ -737,6 +883,7 @@ export async function generateProContent(options: {
     step: 3,
     stepName: "Viết kịch bản & đánh giá",
     output: draftResult.script,
+    prompt: draftResult.prompt,
     durationMs: step3Duration,
   });
 

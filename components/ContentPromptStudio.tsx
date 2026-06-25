@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clipboard,
+  Code,
   Copy,
   Eye,
   Loader2,
@@ -68,6 +69,7 @@ type StepEvent = {
   step: number;
   stepName: string;
   output: string;
+  prompt?: string;
   durationMs: number;
 };
 
@@ -397,6 +399,8 @@ function StepProgress({
   currentStep: number;
   isPending: boolean;
 }) {
+  const [visiblePrompt, setVisiblePrompt] = useState<number | null>(null);
+
   return (
     <div className="mt-4 space-y-3">
       {STEP_NAMES.map((name, i) => {
@@ -405,65 +409,103 @@ function StepProgress({
         const isActive = isPending && currentStep === stepNum;
         const isPast = stepNum < currentStep || !!completed;
         const isFuture = !isActive && !isPast && !completed;
+        const showPrompt = visiblePrompt === stepNum;
 
         return (
-          <div
-            key={stepNum}
-            className={`flex items-start gap-3 rounded-lg border p-3 transition-all ${
-              isActive
-                ? "border-kolia-green bg-kolia-mint"
-                : isPast
-                  ? "border-green-200 bg-green-50"
-                  : "border-slate-200 bg-slate-50"
-            }`}
-          >
-            {/* Step indicator */}
+          <div key={stepNum}>
             <div
-              className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-bold ${
+              className={`flex items-start gap-3 rounded-lg border p-3 transition-all ${
                 isActive
-                  ? "bg-kolia-green text-white"
+                  ? "border-kolia-green bg-kolia-mint"
                   : isPast
-                    ? "bg-green-500 text-white"
-                    : "bg-slate-200 text-slate-500"
+                    ? "border-green-200 bg-green-50"
+                    : "border-slate-200 bg-slate-50"
               }`}
             >
-              {isPast ? (
-                <Check className="h-4 w-4" />
-              ) : isActive ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                stepNum
-              )}
-            </div>
-
-            {/* Step info */}
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center justify-between">
-                <p
-                  className={`text-sm font-bold ${
-                    isFuture ? "text-slate-400" : "text-kolia-ink"
-                  }`}
-                >
-                  Bước {stepNum}: {name}
-                </p>
-                {completed && (
-                  <span className="text-xs text-green-600">
-                    {(completed.durationMs / 1000).toFixed(1)}s
-                  </span>
-                )}
-              </div>
-              <p
-                className={`mt-0.5 text-xs leading-5 ${
-                  isFuture ? "text-slate-300" : "text-slate-500"
+              {/* Step indicator */}
+              <div
+                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-bold ${
+                  isActive
+                    ? "bg-kolia-green text-white"
+                    : isPast
+                      ? "bg-green-500 text-white"
+                      : "bg-slate-200 text-slate-500"
                 }`}
               >
-                {isActive
-                  ? STEP_DESCRIPTIONS[i]
-                  : isPast
-                    ? "Hoàn thành ✓"
-                    : STEP_DESCRIPTIONS[i]}
-              </p>
+                {isPast ? (
+                  <Check className="h-4 w-4" />
+                ) : isActive ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  stepNum
+                )}
+              </div>
+
+              {/* Step info */}
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between">
+                  <p
+                    className={`text-sm font-bold ${
+                      isFuture ? "text-slate-400" : "text-kolia-ink"
+                    }`}
+                  >
+                    Bước {stepNum}: {name}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    {completed && completed.prompt && (
+                      <button
+                        type="button"
+                        onClick={() => setVisiblePrompt(showPrompt ? null : stepNum)}
+                        className="flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 text-[10px] font-semibold text-slate-500 hover:bg-slate-100"
+                      >
+                        <Code className="h-3 w-3" />
+                        {showPrompt ? "Ẩn prompt" : "Xem raw prompt"}
+                      </button>
+                    )}
+                    {completed && (
+                      <span className="text-xs text-green-600">
+                        {(completed.durationMs / 1000).toFixed(1)}s
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <p
+                  className={`mt-0.5 text-xs leading-5 ${
+                    isFuture ? "text-slate-300" : "text-slate-500"
+                  }`}
+                >
+                  {isActive
+                    ? STEP_DESCRIPTIONS[i]
+                    : isPast
+                      ? "Hoàn thành ✓"
+                      : STEP_DESCRIPTIONS[i]}
+                </p>
+              </div>
             </div>
+
+            {/* Raw Prompt */}
+            {showPrompt && completed?.prompt && (
+              <div className="mt-2 rounded-lg border border-indigo-200 bg-indigo-50 p-4">
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-xs font-bold uppercase tracking-wider text-indigo-600">
+                    📝 Raw Prompt — Bước {stepNum}: {completed.stepName}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(completed.prompt || "");
+                    }}
+                    className="flex items-center gap-1 rounded border border-indigo-200 bg-white px-2 py-1 text-[10px] font-semibold text-indigo-600 hover:bg-indigo-100"
+                  >
+                    <Copy className="h-3 w-3" />
+                    Copy
+                  </button>
+                </div>
+                <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded border border-indigo-100 bg-white p-3 font-mono text-[11px] leading-6 text-slate-700">
+                  {completed.prompt}
+                </pre>
+              </div>
+            )}
           </div>
         );
       })}
@@ -535,7 +577,7 @@ export function ContentPromptStudio({
       });
   }, [sources, days]);
 
-  // Generation state
+  // Generation state (Auto mode)
   const [isPending, setIsPending] = useState(false);
   const [stepEvents, setStepEvents] = useState<StepEvent[]>([]);
   const [currentStep, setCurrentStep] = useState(0);
@@ -544,6 +586,234 @@ export function ContentPromptStudio({
   const [copied, setCopied] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
+
+  // Manual mode state
+  const [mode, setMode] = useState<'auto' | 'manual'>('auto');
+  const [manualCurrentStep, setManualCurrentStep] = useState<1 | 2 | 3>(1);
+  const [manualPromptText, setManualPromptText] = useState<Record<number, string>>({});
+  const [manualSystemInstruction, setManualSystemInstruction] = useState<Record<number, string>>({});
+  const [manualResults, setManualResults] = useState<Record<number, { prompt: string; output: string; stepName: string; parsed?: Record<string, unknown> }>>({});
+  const [manualLoading, setManualLoading] = useState<Record<number, boolean>>({});
+  const [manualReset, setManualReset] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
+
+  // ─── Manual Step Helpers ────────────────────────────────────────────────
+
+  const loadManualStepPrompt = useCallback(async (stepNum: 1 | 2 | 3) => {
+    // Don't reload if already have prompt for this step
+    if (manualPromptText[stepNum]) return;
+
+    setManualLoading(prev => ({ ...prev, [stepNum]: true }));
+    setManualError(null);
+
+    try {
+      const body: Record<string, unknown> = {
+        step: stepNum,
+        platform,
+        mainTopic: selectedGaps[0] || "Thị trường tài chính",
+        marketContext: marketContext || undefined,
+      };
+
+      // Pass context from previous steps
+      if (stepNum >= 2 && manualResults[1]) {
+        body.researchBrief = manualResults[1].output;
+      }
+      if (stepNum === 3 && manualResults[2]) {
+        body.outlineRaw = manualResults[2].output;
+        body.outlineJSON = manualResults[2].parsed || {};
+      }
+
+      const response = await fetch("/api/content/generate-pro/step", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const data = await response.json();
+      if (data.error) {
+        setManualError(data.error);
+        return;
+      }
+
+      // Parse prompt into system instruction and user prompt
+      const promptText = data.prompt || "";
+      const parts = promptText.split("📝 User Prompt");
+      const sysInst = parts[0]?.replace("🧠 System Instruction:", "").trim() || "";
+      const userPrompt = parts[1] ? "📝 User Prompt" + parts[1] : promptText;
+
+      setManualPromptText(prev => ({ ...prev, [stepNum]: userPrompt }));
+      setManualSystemInstruction(prev => ({ ...prev, [stepNum]: sysInst }));
+
+      // Also store the result if the step already ran
+      if (data.output) {
+        setManualResults(prev => ({
+          ...prev,
+          [stepNum]: {
+            prompt: data.prompt,
+            output: data.output,
+            stepName: data.stepName,
+            parsed: data.parsed,
+          },
+        }));
+      }
+    } catch (err) {
+      setManualError(err instanceof Error ? err.message : "Không thể tải prompt.");
+    } finally {
+      setManualLoading(prev => ({ ...prev, [stepNum]: false }));
+    }
+  }, [platform, selectedGaps, marketContext, manualResults]);
+
+  const executeManualStep = useCallback(async (stepNum: 1 | 2 | 3) => {
+    setManualLoading(prev => ({ ...prev, [stepNum]: true }));
+    setManualError(null);
+    setError(null);
+
+    try {
+      const body: Record<string, unknown> = {
+        step: stepNum,
+        platform,
+        mainTopic: selectedGaps[0] || "Thị trường tài chính",
+        marketContext: marketContext || undefined,
+      };
+
+      // Pass context from previous steps
+      if (stepNum >= 2 && manualResults[1]) {
+        body.researchBrief = manualResults[1].output;
+      }
+      if (stepNum === 3 && manualResults[2]) {
+        body.outlineRaw = manualResults[2].output;
+        body.outlineJSON = manualResults[2].parsed || {};
+      }
+
+      // Pass user-edited prompt if changed
+      const currentPrompt = manualPromptText[stepNum];
+      const currentSysInst = manualSystemInstruction[stepNum];
+      if (currentPrompt) {
+        body.overriddenUserPrompt = currentPrompt;
+        body.overriddenSystemInstruction = currentSysInst;
+      }
+
+      const response = await fetch("/api/content/generate-pro/step", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const data = await response.json();
+      if (data.error) {
+        setManualError(data.error);
+        return;
+      }
+
+      setManualResults(prev => ({
+        ...prev,
+        [stepNum]: {
+          prompt: data.prompt,
+          output: data.output,
+          stepName: data.stepName,
+          parsed: data.parsed,
+        },
+      }));
+
+      // For step 1: save prompt text for editing
+      if (!manualPromptText[stepNum]) {
+        const promptText = data.prompt || "";
+        const parts = promptText.split("📝 User Prompt");
+        const sysInst = parts[0]?.replace("🧠 System Instruction:", "").trim() || "";
+        const userPrompt = parts[1] ? "📝 User Prompt" + parts[1] : promptText;
+        setManualPromptText(prev => ({ ...prev, [stepNum]: userPrompt }));
+        setManualSystemInstruction(prev => ({ ...prev, [stepNum]: sysInst }));
+      }
+
+      // For step 3: assemble final result from all step outputs
+      if (stepNum === 3) {
+        const step1Out = manualResults[1]?.output || "";
+        const step2Out = manualResults[2]?.output || "";
+        const step3Out = data.output || "";
+
+        // Try to extract quality metrics from step 3 output
+        let hookScore: number | undefined;
+        let retentionRisks: string[] | undefined;
+        let alternativeHooks: string[] | undefined;
+        let seoTitle: string | undefined;
+        let seoDescription: string | undefined;
+        let hashtags: string[] | undefined;
+        let qualityChecklist: Record<string, unknown> | undefined;
+        let titleVariants: string[] | undefined;
+        let outlineRaw = step2Out;
+        let outlineJSON = data.parsed;
+
+        // Extract quality metrics if present
+        const separator = "---QUALITY_METRICS---";
+        const sepIndex = step3Out.indexOf(separator);
+        let script = step3Out;
+        if (sepIndex !== -1) {
+          script = step3Out.slice(0, sepIndex).trim();
+          const metricsRaw = step3Out.slice(sepIndex + separator.length).trim();
+          try {
+            const metrics = JSON.parse(metricsRaw);
+            hookScore = metrics.hookScore;
+            retentionRisks = metrics.retentionRisks;
+            alternativeHooks = metrics.alternativeHooks;
+            seoTitle = metrics.seoTitle;
+            seoDescription = metrics.seoDescription;
+            hashtags = metrics.hashtags;
+            qualityChecklist = metrics.qualityChecklist;
+          } catch { /* ignore parse error */ }
+        }
+
+        // Try to parse title from step 2 outline
+        let title = selectedGaps[0] || "Phân tích thị trường";
+        try {
+          const outlineParsed = typeof step2Out === 'string' ? JSON.parse(step2Out) : step2Out;
+          if (outlineParsed?.title) title = outlineParsed.title;
+        } catch { /* ignore */ }
+
+        setResult({
+          items: [{
+            id: `manual-${Date.now()}`,
+            platform,
+            contentType: platform === "youtube" ? "script" : platform === "tiktok" ? "script" : "post",
+            title,
+            script,
+            toneOfVoice: "Chuyên gia",
+            mainTopic: selectedGaps[0] || "Thị trường tài chính",
+            status: "draft",
+            createdAt: new Date().toISOString(),
+            hookScore,
+            retentionRisks,
+            alternativeHooks,
+            seoTitle,
+            seoDescription,
+            hashtags,
+            qualityChecklist,
+            titleVariants,
+            researchBrief: step1Out,
+            outline: step2Out,
+          }],
+          totalGenerated: 1,
+        });
+      }
+    } catch (err) {
+      setManualError(err instanceof Error ? err.message : "Không thể thực thi bước.");
+    } finally {
+      setManualLoading(prev => ({ ...prev, [stepNum]: false }));
+    }
+  }, [platform, selectedGaps, marketContext, manualResults, manualPromptText, manualSystemInstruction]);
+
+  // Reset manual state when switching to manual mode — KHÔNG tự động gọi API
+  useEffect(() => {
+    if (mode === 'manual' && !manualReset) {
+      setManualReset(true);
+      setManualCurrentStep(1);
+      setManualPromptText({});
+      setManualSystemInstruction({});
+      setManualResults({});
+      setManualLoading({});
+      setManualError(null);
+      setResult(null);
+    }
+  }, [mode]);
 
   const toggle = (
     value: string,
@@ -642,6 +912,7 @@ export function ContentPromptStudio({
                     step: parsed.step,
                     stepName: parsed.stepName,
                     output: parsed.output,
+                    prompt: parsed.prompt,
                     durationMs: parsed.durationMs,
                   };
                   setStepEvents((prev) => [...prev, stepEvt]);
@@ -1139,31 +1410,238 @@ export function ContentPromptStudio({
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={submitPrompt}
-                  disabled={!configured || isPending}
-                  className="inline-flex items-center gap-2 rounded bg-kolia-ink px-6 py-3 text-sm font-bold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Sparkles className="h-4 w-4" />
-                  )}
-                  {isPending
-                    ? "Đang tạo (3 bước)..."
-                    : "✨ Tạo kịch bản chuyên nghiệp"}
-                </button>
+                {/* Mode Toggle */}
+                <div className="flex items-center rounded-lg border border-kolia-line bg-slate-100 p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => { setMode('auto'); setManualReset(false); }}
+                    className={`rounded-md px-3 py-1.5 text-xs font-bold transition ${
+                      mode === 'auto'
+                        ? 'bg-white text-kolia-ink shadow-sm'
+                        : 'text-slate-500 hover:text-kolia-ink'
+                    }`}
+                  >
+                    Auto
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setMode('manual'); }}
+                    className={`rounded-md px-3 py-1.5 text-xs font-bold transition ${
+                      mode === 'manual'
+                        ? 'bg-white text-kolia-ink shadow-sm'
+                        : 'text-slate-500 hover:text-kolia-ink'
+                    }`}
+                  >
+                    Manual
+                  </button>
+                </div>
+
+                {mode === 'auto' && (
+                  <button
+                    type="button"
+                    onClick={submitPrompt}
+                    disabled={!configured || isPending}
+                    className="inline-flex items-center gap-2 rounded bg-kolia-ink px-6 py-3 text-sm font-bold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="h-4 w-4" />
+                    )}
+                    {isPending
+                      ? "Đang tạo (3 bước)..."
+                      : "✨ Tạo kịch bản chuyên nghiệp"}
+                  </button>
+                )}
               </div>
             </div>
 
-            {/* Step Progress */}
-            {isPending && (
+            {/* Auto Mode: Step Progress */}
+            {mode === 'auto' && (isPending || stepEvents.length > 0) && (
               <StepProgress
                 steps={stepEvents}
                 currentStep={currentStep}
                 isPending={isPending}
               />
+            )}
+
+            {/* Manual Mode */}
+            {mode === 'manual' && (
+              <div className="mt-4 space-y-5">
+                {[1, 2, 3].map((stepNum) => {
+                  const stepResult = manualResults[stepNum];
+                  const isCurrent = manualCurrentStep === stepNum;
+                  const isPast = stepNum < manualCurrentStep && !!stepResult;
+                  const isLocked = stepNum > manualCurrentStep && !stepResult;
+                  const isLoading = manualLoading[stepNum];
+
+                  return (
+                    <div
+                      key={stepNum}
+                      className={`rounded-lg border p-4 transition-all ${
+                        isCurrent
+                          ? 'border-kolia-green bg-kolia-mint/30'
+                          : isPast
+                            ? 'border-green-200 bg-green-50/50'
+                            : isLocked
+                              ? 'border-slate-200 bg-slate-50 opacity-50'
+                              : stepResult
+                                ? 'border-green-200 bg-green-50/50'
+                                : 'border-slate-200 bg-slate-50'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <div className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold ${
+                            isPast || stepResult
+                              ? 'bg-green-500 text-white'
+                              : isCurrent
+                                ? 'bg-kolia-green text-white'
+                                : 'bg-slate-200 text-slate-500'
+                          }`}>
+                            {isPast || stepResult ? (
+                              <Check className="h-3.5 w-3.5" />
+                            ) : (
+                              stepNum
+                            )}
+                          </div>
+                          <h3 className="text-sm font-bold text-kolia-ink">
+                            Bước {stepNum}: {STEP_NAMES[stepNum - 1]}
+                          </h3>
+                        </div>
+                        {stepResult && (
+                          <span className="text-xs text-green-600 font-semibold">
+                            ✓ Hoàn thành
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Prompt area */}
+                      {isCurrent && (
+                        <div className="mt-4 space-y-3">
+                          {/* Chưa có prompt → hiển thị nút Generate Prompt */}
+                          {!manualPromptText[stepNum] && !isLoading ? (
+                            <div className="rounded border border-dashed border-indigo-200 bg-indigo-50/50 p-6 text-center">
+                              <p className="text-sm text-indigo-600 font-semibold mb-2">
+                                🪄 Bước này chưa có prompt
+                              </p>
+                              <p className="text-xs text-indigo-400 mb-4">
+                                Bấm "Tạo prompt" để AI sinh prompt mặc định từ dữ liệu đối thủ,
+                                sau đó bạn có thể chỉnh sửa trước khi thực thi.
+                              </p>
+                              <button
+                                type="button"
+                                onClick={() => executeManualStep(stepNum as 1 | 2 | 3)}
+                                disabled={!configured || isLoading}
+                                className="inline-flex items-center gap-2 rounded bg-indigo-600 px-5 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                {isLoading ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                  <Sparkles className="h-4 w-4" />
+                                )}
+                                {isLoading ? "Đang tạo prompt..." : "🪄 Tạo prompt"}
+                              </button>
+                              {manualError && (
+                                <p className="mt-3 text-xs text-red-500">{manualError}</p>
+                              )}
+                            </div>
+                          ) : (
+                            <>
+                              <label className="block">
+                                <span className="text-xs font-bold uppercase tracking-wider text-indigo-600">
+                                  📝 System Instruction
+                                </span>
+                                <textarea
+                                  value={manualSystemInstruction[stepNum] || ''}
+                                  onChange={(e) => setManualSystemInstruction(prev => ({ ...prev, [stepNum]: e.target.value }))}
+                                  rows={6}
+                                  className="mt-1 w-full rounded border border-indigo-200 bg-white p-3 text-xs leading-5 font-mono text-slate-700 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+                                />
+                              </label>
+                              <label className="block">
+                                <span className="text-xs font-bold uppercase tracking-wider text-indigo-600">
+                                  📝 User Prompt (có thể chỉnh sửa)
+                                </span>
+                                <textarea
+                                  value={manualPromptText[stepNum] || ''}
+                                  onChange={(e) => setManualPromptText(prev => ({ ...prev, [stepNum]: e.target.value }))}
+                                  rows={10}
+                                  className="mt-1 w-full rounded border border-indigo-200 bg-white p-3 text-xs leading-5 font-mono text-slate-700 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+                                />
+                              </label>
+
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => executeManualStep(stepNum as 1 | 2 | 3)}
+                                  disabled={!configured || isLoading}
+                                  className="inline-flex items-center gap-2 rounded bg-kolia-green px-5 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                  {isLoading ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Zap className="h-4 w-4" />
+                                  )}
+                                  {isLoading ? "Đang xử lý..." : stepResult ? "⚡ Thực thi lại" : "⚡ Thực thi"}
+                                </button>
+                                {manualError && <p className="text-xs text-red-500">{manualError}</p>}
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Output */}
+                      {stepResult && (
+                        <div className="mt-3">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-xs font-bold uppercase tracking-wider text-green-600">
+                              📊 Kết quả bước {stepNum}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(stepResult.output);
+                              }}
+                              className="flex items-center gap-1 rounded border border-green-200 bg-white px-2 py-1 text-[10px] font-semibold text-green-600 hover:bg-green-50"
+                            >
+                              <Copy className="h-3 w-3" />
+                              Copy
+                            </button>
+                          </div>
+                          <div className="max-h-60 overflow-y-auto whitespace-pre-wrap rounded border border-green-100 bg-white p-3 font-mono text-[11px] leading-6 text-slate-700">
+                            {stepResult.output}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Next Step Button */}
+                      {isPast && stepNum < 3 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setManualCurrentStep((stepNum + 1) as 1 | 2 | 3);
+                            loadManualStepPrompt((stepNum + 1) as 1 | 2 | 3);
+                          }}
+                          className="mt-3 inline-flex items-center gap-1.5 rounded border border-kolia-green bg-white px-4 py-2 text-xs font-bold text-kolia-green hover:bg-kolia-mint"
+                        >
+                          Tiếp tục bước {stepNum + 1}
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+
+                      {/* Show final result after step 3 */}
+                      {stepNum === 3 && stepResult && (
+                        <div className="mt-4 rounded border border-amber-200 bg-amber-50 p-3">
+                          <p className="text-xs font-bold text-amber-700">✅ Đã hoàn thành tất cả các bước!</p>
+                          <p className="mt-1 text-xs text-amber-600">Kết quả cuối cùng hiển thị bên dưới phần Đánh giá chất lượng.</p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             )}
 
             <p className="mt-3 text-xs leading-5 text-slate-500">
