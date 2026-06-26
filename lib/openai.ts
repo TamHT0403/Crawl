@@ -82,10 +82,107 @@ export async function getProviderInfo(): Promise<ProviderInfo & { id: string }> 
   return { id: providerId, ...provider };
 }
 
+// ─── Rate-limit retry with exponential backoff + jitter ───────────────────
+// Bảo vệ toàn bộ lời gọi model khỏi 429 Too Many Requests.
+// Strategy:
+//   - Max 3 retries (4 total attempts)
+//   - Delay = baseDelay * 2^attempt + jitter(0..500ms)
+//   - Nếu response header có Retry-After, dùng giá trị đó thay vì tính tự động
+//   - Sau khi hết retry vẫn 429 → ném lỗi rõ ràng với retry count
+
+const RATE_LIMIT_RETRY_MAX = 3;
+const RATE_LIMIT_BASE_DELAY_MS = 2000; // 2s base → 2s, 4s, 8s (+ jitter)
+const RATE_LIMIT_MAX_DELAY_MS = 32_000; // cap mỗi attempt ở 32s
+
+function isRateLimitError(err: unknown): boolean {
+  if (err instanceof Error) {
+    const msg = err.message.toLowerCase();
+    if (msg.includes("rate limit") || msg.includes("too many requests") || msg.includes("429")) {
+      return true;
+    }
+  }
+  // OpenAI SDK throws APIStatusError with status property
+  if (typeof err === "object" && err !== null && "status" in err) {
+    return (err as { status: number }).status === 429;
+  }
+  return false;
+}
+
+function extractRetryAfterMs(err: unknown): number | null {
+  // OpenAI SDK error may carry response headers via .headers
+  if (typeof err === "object" && err !== null && "headers" in err) {
+    const headers = (err as { headers: Record<string, string> }).headers;
+    const retryAfter = headers?.["retry-after"] || headers?.["x-ratelimit-reset-requests"];
+    if (retryAfter) {
+      const secs = parseFloat(retryAfter);
+      if (!isNaN(secs)) return Math.ceil(secs * 1000);
+    }
+  }
+  return null;
+}
+
+/**
+ * Wraps any async function with exponential backoff + jitter retry logic
+ * specifically for 429 rate-limit errors from any AI provider.
+ *
+ * @param fn       - The async function to call (e.g. a model API call)
+ * @param label    - Human-readable label for logging (e.g. "Step 1 / openai")
+ * @param options  - Override maxRetries or baseDelayMs
+ */
+export async function callWithRetry<T>(
+  fn: () => Promise<T>,
+  label = "AI call",
+  options?: { maxRetries?: number; baseDelayMs?: number },
+): Promise<T> {
+  const maxRetries = options?.maxRetries ?? RATE_LIMIT_RETRY_MAX;
+  const baseDelay = options?.baseDelayMs ?? RATE_LIMIT_BASE_DELAY_MS;
+
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+
+      if (!isRateLimitError(err)) {
+        // Not a rate-limit error — rethrow immediately, no retry
+        throw err;
+      }
+
+      if (attempt >= maxRetries) {
+        // Exhausted all retries
+        break;
+      }
+
+      // Calculate delay: exponential backoff + random jitter
+      const retryAfterMs = extractRetryAfterMs(err);
+      const backoff = Math.min(baseDelay * Math.pow(2, attempt), RATE_LIMIT_MAX_DELAY_MS);
+      const jitter = Math.floor(Math.random() * 500);
+      const delayMs = retryAfterMs ?? (backoff + jitter);
+
+      console.warn(
+        `[callWithRetry] 429 rate limit on "${label}" — attempt ${attempt + 1}/${maxRetries + 1}. ` +
+        `Retrying in ${(delayMs / 1000).toFixed(1)}s…`,
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  // All retries exhausted — throw a clear error with context
+  const baseMsg = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(
+    `[Rate Limit] "${label}" thất bại sau ${maxRetries + 1} lần thử (429 Too Many Requests). ` +
+    `Kiểm tra quota/limit của provider hoặc thử lại sau. Chi tiết: ${baseMsg}`,
+  );
+}
+
 // ─── Responses → Chat Completions adapter ──────────────────────────────────
 // Tất cả code trong project dùng client.responses.create() (OpenAI Responses API).
 // Các provider khác (Gemini, Groq, HuggingFace) không support Responses API.
 // Proxy này tự động map responses.create() → chat.completions.create() và ngược lại.
+// callWithRetry() bảo vệ lời gọi khỏi 429.
 
 type ResponsesParams = {
   model?: string;
@@ -118,18 +215,28 @@ function createResponsesAdapter(client: OpenAI) {
         }
       }
 
-      // Gọi Chat Completions (hoạt động trên mọi provider)
-      const completion = await client.chat.completions.create({
-        model: params.model || (await getAIModel()),
-        messages,
-        max_tokens: params.max_output_tokens ?? 1000,
-      });
+      // Resolve model — params.model luôn được caller truyền vào; fallback async chỉ dùng khi không có
+      const resolvedModel = params.model || (await getAIModel());
+
+      // Gọi Chat Completions với retry tự động cho 429
+      const completion = await callWithRetry(
+        () =>
+          client.chat.completions.create({
+            model: resolvedModel,
+            messages,
+            max_tokens: params.max_output_tokens ?? 1000,
+          }),
+        `responses.create (adapter / ${resolvedModel})`,
+      );
 
       return {
         id: completion.id,
         output_text: completion.choices?.[0]?.message?.content || "",
         usage: completion.usage
-          ? { input_tokens: completion.usage.prompt_tokens, output_tokens: completion.usage.completion_tokens }
+          ? {
+              input_tokens: completion.usage.prompt_tokens,
+              output_tokens: completion.usage.completion_tokens,
+            }
           : undefined,
       };
     },
@@ -182,6 +289,7 @@ export async function isAIConfigured(): Promise<boolean> {
 }
 
 // ─── Universal AI caller (Chat Completions — hoạt động trên mọi provider) ──
+// callWithRetry() bảo vệ khỏi 429 rate limit.
 export async function callAI(
   messages: { role: "system" | "user" | "assistant"; content: string }[],
   options?: { maxTokens?: number; model?: string },
@@ -189,11 +297,15 @@ export async function callAI(
   const client = await getAIClient(false);
   const model = options?.model || (await getAIModel());
 
-  const response = await client.chat.completions.create({
-    model,
-    messages,
-    max_tokens: options?.maxTokens ?? 1000,
-  });
+  const response = await callWithRetry(
+    () =>
+      client.chat.completions.create({
+        model,
+        messages,
+        max_tokens: options?.maxTokens ?? 1000,
+      }),
+    `callAI (${model})`,
+  );
 
   return response.choices?.[0]?.message?.content || "";
 }

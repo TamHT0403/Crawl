@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import type { ContentStatus } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -82,14 +83,15 @@ export async function PATCH(request: Request) {
 
   // ── Nếu có status → update trạng thái (luồng cũ) ──────────────────────
   if (body.status) {
-    const validStatuses = ["draft", "approved", "scheduled", "published", "archived"];
-    if (!validStatuses.includes(body.status as string)) {
+    const validStatuses: ContentStatus[] = ["draft", "qa_warning", "qa_failed", "approved", "scheduled", "published", "archived"];
+    const requestedStatus = body.status as ContentStatus;
+    if (!validStatuses.includes(requestedStatus)) {
       return NextResponse.json(
         { error: `Status không hợp lệ. Chấp nhận: ${validStatuses.join(", ")}` },
         { status: 400 }
       );
     }
-    updateData.status = body.status;
+    updateData.status = requestedStatus;
 
     if (body.scheduledAt) {
       updateData.scheduledAt = new Date(body.scheduledAt as string);

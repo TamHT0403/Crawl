@@ -35,17 +35,63 @@ function createSSEResponse(stream: ReadableStream<Uint8Array>): Response {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  GET /api/content/generate-pro
+//  SHARED QA GATE — applied to BOTH SSE and JSON modes
 // ═══════════════════════════════════════════════════════════════════════════
+
+type QAGateResult = {
+  saveStatus: "draft" | "qa_warning" | "qa_failed";
+  qaGateReason: string | null;
+  qaGateFailed: boolean;
+  qaGateWarning: boolean;
+};
+
+/**
+ * Evaluates hookScore + qualityChecklist and returns the appropriate
+ * save status. Same thresholds are enforced for SSE and JSON modes.
+ *
+ * Thresholds:
+ *   hookScore < 5  AND  ≥2 critical items fail → qa_failed
+ *   hookScore < 5  OR   ≥3 critical items fail → qa_warning
+ *   otherwise                                  → draft
+ */
+function applyQAGate(
+  hookScore: number | undefined,
+  qualityChecklist: Record<string, unknown> | undefined,
+): QAGateResult {
+  const score = hookScore ?? 0;
+  const cl = qualityChecklist ?? {};
+  const criticalItems = [
+    cl.hasDataPoints,
+    cl.hasRiskDisclaimer,
+    cl.hasStrongHeadline,
+    cl.hasClearParagraphFlow,
+    cl.hasActionableTakeaways,
+  ];
+  const failedCount = criticalItems.filter(v => !v).length;
+
+  if (score < 5 && failedCount >= 2) {
+    const reason = `hookScore ${score.toFixed(1)}/10 (< 5) + ${failedCount} checklist items failed. Nội dung cần chỉnh sửa trước khi publish.`;
+    console.warn("[QA Gate] FAILED:", reason);
+    return { saveStatus: "qa_failed", qaGateReason: reason, qaGateFailed: true, qaGateWarning: false };
+  }
+  if (score < 5 || failedCount >= 3) {
+    const reason = `hookScore ${score.toFixed(1)}/10 hoặc ${failedCount} checklist items failed. Nên review trước khi publish.`;
+    console.warn("[QA Gate] WARNING:", reason);
+    return { saveStatus: "qa_warning", qaGateReason: reason, qaGateFailed: false, qaGateWarning: true };
+  }
+  return { saveStatus: "draft", qaGateReason: null, qaGateFailed: false, qaGateWarning: false };
+}
 
 export async function GET() {
   return NextResponse.json({
     configured: await isOpenAIConfigured(),
-    engine: "pro-v2",
-    description: "Multi-step AI generation: Research → Outline → Draft & Polish",
+    engine: "pro-v4",
+    description: "5-Step Specialized Agent Pipeline: Deep Research → Angle Blueprint → Scene Outline → Script Writer → QA Agent",
     endpoint: "/api/content/generate-pro",
     methods: ["POST"],
     streaming: "Set Accept: text/event-stream for SSE mode",
+    steps: 5,
+    features: ["web-search", "context-cache", "smart-selector", "word-for-word-script", "qa-agent"],
   });
 }
 
@@ -86,14 +132,37 @@ export async function POST(request: Request) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  JSON MODE — backward-compatible, delegates to generateProBatch
+//  JSON MODE — backward-compatible, QA gate applied before DB save
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function handleJSON(body: { syncRunId?: string } & GenerateBatchInput) {
   try {
     if (body.syncRunId) {
+      // syncRun path: QA gate applied after batch completes (same policy as normal JSON path)
       const result = await autoGenerateProFromSync(body.syncRunId);
-      return NextResponse.json(result);
+      const items = result.items ?? [];
+      const gatedItems = await Promise.all(
+        items.map(async (item: Record<string, unknown>) => {
+          const gate = applyQAGate(
+            item.hookScore as number | undefined,
+            item.qualityChecklist as Record<string, unknown> | undefined,
+          );
+          if (gate.saveStatus !== "draft" && item.id) {
+            await prisma.generatedContent.update({
+              where: { id: item.id as string },
+              data: { status: gate.saveStatus },
+            }).catch(() => { /* non-fatal */ });
+          }
+          return {
+            ...item,
+            status: gate.saveStatus,
+            qaGateFailed: gate.qaGateFailed,
+            qaGateWarning: gate.qaGateWarning,
+            qaGateReason: gate.qaGateReason,
+          };
+        })
+      );
+      return NextResponse.json({ ...result, items: gatedItems });
     }
 
     if (!body.entries?.length) {
@@ -103,8 +172,37 @@ async function handleJSON(body: { syncRunId?: string } & GenerateBatchInput) {
       );
     }
 
+    // Run the pro pipeline (same engine as SSE mode)
     const result = await generateProBatch(body);
-    return NextResponse.json(result);
+
+    // ─── Apply QA Gate (same policy as SSE mode) ──────────────────────────
+    // generateProBatch saves items internally, so we annotate the response
+    // and update the DB status to match the gate decision.
+    const items = result.items ?? [];
+    const gatedItems = await Promise.all(
+      items.map(async (item: Record<string, unknown>) => {
+        const gate = applyQAGate(
+          item.hookScore as number | undefined,
+          item.qualityChecklist as Record<string, unknown> | undefined,
+        );
+        if (gate.saveStatus !== "draft" && item.id) {
+          // Back-fill the status set by generateProBatch (which always saves "draft")
+          await prisma.generatedContent.update({
+            where: { id: item.id as string },
+            data: { status: gate.saveStatus },
+          }).catch(() => { /* non-fatal: don't break response */ });
+        }
+        return {
+          ...item,
+          status: gate.saveStatus,
+          qaGateFailed: gate.qaGateFailed,
+          qaGateWarning: gate.qaGateWarning,
+          qaGateReason: gate.qaGateReason,
+        };
+      })
+    );
+
+    return NextResponse.json({ ...result, items: gatedItems });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Content generation failed.";
     console.error("[content-generate-pro] JSON Error:", error);
@@ -147,11 +245,34 @@ function handleSSE(body: { syncRunId?: string } & GenerateBatchInput): Response 
       };
 
       try {
-        // ─── syncRunId path: delegate to batch, emit final result ────
+        // ─── syncRunId path: delegate to batch, apply QA gate, emit final result ─
         if (body.syncRunId) {
-          emit("step", { step: 1, stepName: "Research", output: "Đang phân tích sync run...", durationMs: 0 });
+          emit("step", { step: 1, stepName: "Deep Research (sync)", output: "Đang phân tích sync run...", durationMs: 0 });
           const result = await autoGenerateProFromSync(body.syncRunId);
-          emit("complete", result);
+          // Apply QA gate — same policy as SSE single-entry and JSON normal paths
+          const items = result.items ?? [];
+          const gatedItems = await Promise.all(
+            items.map(async (item: Record<string, unknown>) => {
+              const gate = applyQAGate(
+                item.hookScore as number | undefined,
+                item.qualityChecklist as Record<string, unknown> | undefined,
+              );
+              if (gate.saveStatus !== "draft" && item.id) {
+                await prisma.generatedContent.update({
+                  where: { id: item.id as string },
+                  data: { status: gate.saveStatus },
+                }).catch(() => { /* non-fatal */ });
+              }
+              return {
+                ...item,
+                status: gate.saveStatus,
+                qaGateFailed: gate.qaGateFailed,
+                qaGateWarning: gate.qaGateWarning,
+                qaGateReason: gate.qaGateReason,
+              };
+            })
+          );
+          emit("complete", { ...result, items: gatedItems });
           controller.close();
           return;
         }
@@ -162,6 +283,7 @@ function handleSSE(body: { syncRunId?: string } & GenerateBatchInput): Response 
         const result = await generateProContent({
           platform: firstEntry.platform,
           contentType: firstEntry.contentType,
+          outputMode: firstEntry.outputMode,
           mainTopic: firstEntry.mainTopic,
           toneOfVoice: firstEntry.toneOfVoice,
           marketContext: body.marketContext,
@@ -198,6 +320,13 @@ function handleSSE(body: { syncRunId?: string } & GenerateBatchInput): Response 
           ...(result.competitorReferences || []).map(r => `- ${r}`),
         ].filter(Boolean).join("\n");
 
+        // ─── Quality Gate (shared function — same policy as JSON mode) ─────────
+        const gate = applyQAGate(
+          result.hookScore,
+          result.qualityChecklist as Record<string, unknown> | undefined,
+        );
+        const { saveStatus, qaGateReason, qaGateFailed, qaGateWarning } = gate;
+
         // ─── Save to database ───────────────────────────────────────
         const saved = await prisma.generatedContent.create({
           data: {
@@ -211,7 +340,7 @@ function handleSSE(body: { syncRunId?: string } & GenerateBatchInput): Response 
             mainTopic: result.mainTopic,
             sourceGap: body.gapIds ? JSON.stringify(body.gapIds) : null,
             sourcePosts: body.lessonPostIds ? JSON.stringify(body.lessonPostIds) : null,
-            status: "draft",
+            status: saveStatus,
           },
         });
 
@@ -227,9 +356,17 @@ function handleSSE(body: { syncRunId?: string } & GenerateBatchInput): Response 
             cta: result.cta,
             toneOfVoice: result.toneOfVoice,
             mainTopic: result.mainTopic,
-            status: "draft",
+            status: saveStatus,
             createdAt: saved.createdAt.toISOString(),
-            // Quality metrics from Polish step
+            // QA Gate result (shown as warning banner in UI)
+            qaGateFailed,
+            qaGateWarning,
+            qaGateReason,
+            // Step outputs for collapsible panels
+            researchBrief: result.researchBrief,
+            blueprint: result.blueprint,
+            outline: result.outline,
+            // QA metrics from Step 5
             hookScore: result.hookScore,
             retentionRisks: result.retentionRisks,
             alternativeHooks: result.alternativeHooks,
@@ -238,8 +375,6 @@ function handleSSE(body: { syncRunId?: string } & GenerateBatchInput): Response 
             hashtags: result.hashtags,
             qualityChecklist: result.qualityChecklist,
             titleVariants: result.titleVariants,
-            researchBrief: result.researchBrief,
-            outline: result.outline,
           }],
           totalGenerated: 1,
         });

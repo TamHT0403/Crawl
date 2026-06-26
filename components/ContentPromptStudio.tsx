@@ -73,6 +73,8 @@ type StepEvent = {
   durationMs: number;
 };
 
+type OutputMode = "video" | "post";
+
 type ProResult = {
   items: Array<{
     id: string;
@@ -80,6 +82,7 @@ type ProResult = {
     title: string;
     platform: string;
     contentType: string;
+    outputMode?: OutputMode;
     toneOfVoice: string;
     mainTopic: string;
     status: string;
@@ -94,6 +97,11 @@ type ProResult = {
     titleVariants?: string[];
     researchBrief?: string;
     outline?: string;
+    blueprint?: string;
+    // QA Gate
+    qaGateFailed?: boolean;
+    qaGateWarning?: boolean;
+    qaGateReason?: string | null;
   }>;
   totalGenerated: number;
 };
@@ -102,12 +110,14 @@ type ProResult = {
 //  CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-const STEP_NAMES = ["Research", "Outline", "Draft & Polish"];
+const STEP_NAMES = ["Deep Research", "Angle & Blueprint", "Scene Outline", "Script Writer", "QA & Optimize"];
 
 const STEP_DESCRIPTIONS = [
-  "Phân tích sâu dữ liệu đối thủ, engagement patterns, content gaps...",
-  "Thiết kế cấu trúc nội dung, hook strategy, emotional arc...",
-  "Viết kịch bản chuyên nghiệp & đánh giá chất lượng, SEO, hooks...",
+  "Web search + phân tích đối thủ thông minh, chỉ lấy data liên quan nhất...",
+  "Chọn góc nhìn độc đáo + thesis statement + hook word-for-word...",
+  "Thiết kế từng cảnh/đoạn chi tiết với data points cụ thể...",
+  "Viết kịch bản word-for-word, sẵn sàng quay/đăng ngay...",
+  "Đánh giá chất lượng khách quan, hook score, SEO, retention risks...",
 ];
 
 const platformOptions: Array<{
@@ -192,6 +202,7 @@ function CollapsibleSection({
 // ═══════════════════════════════════════════════════════════════════════════
 
 function QualityMetrics({
+  outputMode,
   hookScore,
   qualityChecklist,
   retentionRisks,
@@ -201,6 +212,7 @@ function QualityMetrics({
   seoDescription,
   titleVariants,
 }: {
+  outputMode: OutputMode;
   hookScore?: number;
   qualityChecklist?: Record<string, unknown>;
   retentionRisks?: string[];
@@ -211,6 +223,8 @@ function QualityMetrics({
   titleVariants?: string[];
 }) {
   if (!hookScore && !alternativeHooks?.length) return null;
+
+  const isVideoMode = outputMode === "video";
 
   const scoreColor =
     (hookScore ?? 0) >= 8
@@ -276,6 +290,56 @@ function QualityMetrics({
                   <span>Visual Cues</span>
                 </div>
               )}
+              {qualityChecklist.hasTimestamps != null && (
+                <div className="flex items-center gap-1.5">
+                  {qualityChecklist.hasTimestamps ? (
+                    <Check className="h-3 w-3 text-green-500" />
+                  ) : (
+                    <AlertTriangle className="h-3 w-3 text-red-500" />
+                  )}
+                  <span>Timestamps</span>
+                </div>
+              )}
+              {qualityChecklist.hasBRollSuggestions != null && (
+                <div className="flex items-center gap-1.5">
+                  {qualityChecklist.hasBRollSuggestions ? (
+                    <Check className="h-3 w-3 text-green-500" />
+                  ) : (
+                    <AlertTriangle className="h-3 w-3 text-red-500" />
+                  )}
+                  <span>B-Roll Cues</span>
+                </div>
+              )}
+              {qualityChecklist.hasStrongHeadline != null && (
+                <div className="flex items-center gap-1.5">
+                  {qualityChecklist.hasStrongHeadline ? (
+                    <Check className="h-3 w-3 text-green-500" />
+                  ) : (
+                    <AlertTriangle className="h-3 w-3 text-red-500" />
+                  )}
+                  <span>Strong Headline</span>
+                </div>
+              )}
+              {qualityChecklist.hasClearParagraphFlow != null && (
+                <div className="flex items-center gap-1.5">
+                  {qualityChecklist.hasClearParagraphFlow ? (
+                    <Check className="h-3 w-3 text-green-500" />
+                  ) : (
+                    <AlertTriangle className="h-3 w-3 text-red-500" />
+                  )}
+                  <span>Paragraph Flow</span>
+                </div>
+              )}
+              {qualityChecklist.hasActionableTakeaways != null && (
+                <div className="flex items-center gap-1.5">
+                  {qualityChecklist.hasActionableTakeaways ? (
+                    <Check className="h-3 w-3 text-green-500" />
+                  ) : (
+                    <AlertTriangle className="h-3 w-3 text-red-500" />
+                  )}
+                  <span>Actionable Takeaways</span>
+                </div>
+              )}
               {qualityChecklist.hasRiskDisclaimer != null && (
                 <div className="flex items-center gap-1.5">
                   {qualityChecklist.hasRiskDisclaimer ? (
@@ -284,6 +348,11 @@ function QualityMetrics({
                     <AlertTriangle className="h-3 w-3 text-red-500" />
                   )}
                   <span>Risk Disclaimer</span>
+                </div>
+              )}
+              {typeof qualityChecklist.readabilityLevel === "string" && qualityChecklist.readabilityLevel && (
+                <div className="flex items-center gap-1.5 text-slate-600">
+                  <span>Readability: {qualityChecklist.readabilityLevel}</span>
                 </div>
               )}
             </div>
@@ -351,7 +420,7 @@ function QualityMetrics({
 
       {/* SEO + Hashtags */}
       {(seoTitle || hashtags?.length) && (
-        <CollapsibleSection title="SEO & Hashtags" icon={Hash}>
+        <CollapsibleSection title={isVideoMode ? "SEO & Hashtags" : "SEO Social & Hashtags"} icon={Hash}>
           <div className="space-y-3 text-sm">
             {seoTitle && (
               <div>
@@ -589,7 +658,9 @@ export function ContentPromptStudio({
 
   // Manual mode state
   const [mode, setMode] = useState<'auto' | 'manual'>('auto');
-  const [manualCurrentStep, setManualCurrentStep] = useState<1 | 2 | 3>(1);
+  const [outputMode, setOutputMode] = useState<OutputMode>('video');
+  const [sessionId] = useState<string>(() => `session-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const [manualCurrentStep, setManualCurrentStep] = useState<1 | 2 | 3 | 4 | 5>(1);
   const [manualPromptText, setManualPromptText] = useState<Record<number, string>>({});
   const [manualSystemInstruction, setManualSystemInstruction] = useState<Record<number, string>>({});
   const [manualResults, setManualResults] = useState<Record<number, { prompt: string; output: string; stepName: string; parsed?: Record<string, unknown> }>>({});
@@ -597,9 +668,14 @@ export function ContentPromptStudio({
   const [manualReset, setManualReset] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
 
+  useEffect(() => {
+    // Auto-map default by platform but still allows user to override manually.
+    setOutputMode(platform === "facebook" ? "post" : "video");
+  }, [platform]);
+
   // ─── Manual Step Helpers ────────────────────────────────────────────────
 
-  const loadManualStepPrompt = useCallback(async (stepNum: 1 | 2 | 3) => {
+  const loadManualStepPrompt = useCallback(async (stepNum: 1 | 2 | 3 | 4 | 5) => {
     // Don't reload if already have prompt for this step
     if (manualPromptText[stepNum]) return;
 
@@ -610,18 +686,19 @@ export function ContentPromptStudio({
       const body: Record<string, unknown> = {
         step: stepNum,
         platform,
+        outputMode,
         mainTopic: selectedGaps[0] || "Thị trường tài chính",
+        sessionId,
         marketContext: marketContext || undefined,
+        // Preview-only: build prompt text without executing the AI model (zero token cost)
+        previewOnly: true,
       };
 
-      // Pass context from previous steps
-      if (stepNum >= 2 && manualResults[1]) {
-        body.researchBrief = manualResults[1].output;
-      }
-      if (stepNum === 3 && manualResults[2]) {
-        body.outlineRaw = manualResults[2].output;
-        body.outlineJSON = manualResults[2].parsed || {};
-      }
+      // Fallback context from local results if session cache miss
+      if (stepNum >= 2 && manualResults[1]) body.researchBrief = manualResults[1].output;
+      if (stepNum >= 3 && manualResults[2]) { body.blueprintRaw = manualResults[2].output; body.blueprintJSON = manualResults[2].parsed || {}; }
+      if (stepNum >= 4 && manualResults[3]) { body.sceneOutlineRaw = manualResults[3].output; body.sceneOutlineJSON = manualResults[3].parsed || {}; }
+      if (stepNum === 5 && manualResults[4]) body.fullScript = manualResults[4].output;
 
       const response = await fetch("/api/content/generate-pro/step", {
         method: "POST",
@@ -661,9 +738,9 @@ export function ContentPromptStudio({
     } finally {
       setManualLoading(prev => ({ ...prev, [stepNum]: false }));
     }
-  }, [platform, selectedGaps, marketContext, manualResults]);
+  }, [platform, outputMode, selectedGaps, marketContext, manualResults]);
 
-  const executeManualStep = useCallback(async (stepNum: 1 | 2 | 3) => {
+  const executeManualStep = useCallback(async (stepNum: 1 | 2 | 3 | 4 | 5) => {
     setManualLoading(prev => ({ ...prev, [stepNum]: true }));
     setManualError(null);
     setError(null);
@@ -672,18 +749,17 @@ export function ContentPromptStudio({
       const body: Record<string, unknown> = {
         step: stepNum,
         platform,
+        outputMode,
         mainTopic: selectedGaps[0] || "Thị trường tài chính",
+        sessionId,
         marketContext: marketContext || undefined,
       };
 
-      // Pass context from previous steps
-      if (stepNum >= 2 && manualResults[1]) {
-        body.researchBrief = manualResults[1].output;
-      }
-      if (stepNum === 3 && manualResults[2]) {
-        body.outlineRaw = manualResults[2].output;
-        body.outlineJSON = manualResults[2].parsed || {};
-      }
+      // Fallback context from local results if session cache miss
+      if (stepNum >= 2 && manualResults[1]) body.researchBrief = manualResults[1].output;
+      if (stepNum >= 3 && manualResults[2]) { body.blueprintRaw = manualResults[2].output; body.blueprintJSON = manualResults[2].parsed || {}; }
+      if (stepNum >= 4 && manualResults[3]) { body.sceneOutlineRaw = manualResults[3].output; body.sceneOutlineJSON = manualResults[3].parsed || {}; }
+      if (stepNum === 5 && manualResults[4]) body.fullScript = manualResults[4].output;
 
       // Pass user-edited prompt if changed
       const currentPrompt = manualPromptText[stepNum];
@@ -725,71 +801,42 @@ export function ContentPromptStudio({
         setManualSystemInstruction(prev => ({ ...prev, [stepNum]: sysInst }));
       }
 
-      // For step 3: assemble final result from all step outputs
-      if (stepNum === 3) {
+      // Assemble final result after step 5 completes
+      if (stepNum === 5) {
         const step1Out = manualResults[1]?.output || "";
-        const step2Out = manualResults[2]?.output || "";
-        const step3Out = data.output || "";
+        const step3Out = manualResults[3]?.output || "";
+        const step4Out = manualResults[4]?.output || "";
+        const step5Metrics = data.parsed || {};
 
-        // Try to extract quality metrics from step 3 output
-        let hookScore: number | undefined;
-        let retentionRisks: string[] | undefined;
-        let alternativeHooks: string[] | undefined;
-        let seoTitle: string | undefined;
-        let seoDescription: string | undefined;
-        let hashtags: string[] | undefined;
-        let qualityChecklist: Record<string, unknown> | undefined;
-        let titleVariants: string[] | undefined;
-        let outlineRaw = step2Out;
-        let outlineJSON = data.parsed;
-
-        // Extract quality metrics if present
-        const separator = "---QUALITY_METRICS---";
-        const sepIndex = step3Out.indexOf(separator);
-        let script = step3Out;
-        if (sepIndex !== -1) {
-          script = step3Out.slice(0, sepIndex).trim();
-          const metricsRaw = step3Out.slice(sepIndex + separator.length).trim();
-          try {
-            const metrics = JSON.parse(metricsRaw);
-            hookScore = metrics.hookScore;
-            retentionRisks = metrics.retentionRisks;
-            alternativeHooks = metrics.alternativeHooks;
-            seoTitle = metrics.seoTitle;
-            seoDescription = metrics.seoDescription;
-            hashtags = metrics.hashtags;
-            qualityChecklist = metrics.qualityChecklist;
-          } catch { /* ignore parse error */ }
-        }
-
-        // Try to parse title from step 2 outline
+        // Extract title from blueprint (step 2)
         let title = selectedGaps[0] || "Phân tích thị trường";
         try {
-          const outlineParsed = typeof step2Out === 'string' ? JSON.parse(step2Out) : step2Out;
-          if (outlineParsed?.title) title = outlineParsed.title;
+          const bp = manualResults[2]?.parsed || {};
+          if (bp?.title) title = bp.title as string;
         } catch { /* ignore */ }
 
         setResult({
           items: [{
             id: `manual-${Date.now()}`,
             platform,
-            contentType: platform === "youtube" ? "script" : platform === "tiktok" ? "script" : "post",
+            contentType: platform === "facebook" ? "post" : "script",
             title,
-            script,
+            script: step4Out,
             toneOfVoice: "Chuyên gia",
             mainTopic: selectedGaps[0] || "Thị trường tài chính",
             status: "draft",
             createdAt: new Date().toISOString(),
-            hookScore,
-            retentionRisks,
-            alternativeHooks,
-            seoTitle,
-            seoDescription,
-            hashtags,
-            qualityChecklist,
-            titleVariants,
+            hookScore: step5Metrics.hookScore as number | undefined,
+            retentionRisks: step5Metrics.retentionRisks as string[] | undefined,
+            alternativeHooks: step5Metrics.alternativeHooks as string[] | undefined,
+            seoTitle: step5Metrics.seoTitle as string | undefined,
+            seoDescription: step5Metrics.seoDescription as string | undefined,
+            hashtags: step5Metrics.hashtags as string[] | undefined,
+            qualityChecklist: step5Metrics.qualityChecklist as Record<string, unknown> | undefined,
+            titleVariants: (manualResults[2]?.parsed?.titleVariants ?? step5Metrics.titleVariants) as string[] | undefined,
             researchBrief: step1Out,
-            outline: step2Out,
+            outline: step3Out,
+            blueprint: manualResults[2]?.output,
           }],
           totalGenerated: 1,
         });
@@ -799,7 +846,7 @@ export function ContentPromptStudio({
     } finally {
       setManualLoading(prev => ({ ...prev, [stepNum]: false }));
     }
-  }, [platform, selectedGaps, marketContext, manualResults, manualPromptText, manualSystemInstruction]);
+  }, [platform, outputMode, selectedGaps, marketContext, manualResults, manualPromptText, manualSystemInstruction, sessionId]);
 
   // Reset manual state when switching to manual mode — KHÔNG tự động gọi API
   useEffect(() => {
@@ -854,12 +901,8 @@ export function ContentPromptStudio({
           entries: [
             {
               platform,
-              contentType:
-                platform === "youtube"
-                  ? "script"
-                  : platform === "tiktok"
-                    ? "script"
-                    : "post",
+              contentType: outputMode === "video" ? "script" : "post",
+              outputMode,
               mainTopic: selectedGaps[0] || "Thị trường tài chính",
               toneOfVoice: "Chuyên gia",
             },
@@ -939,12 +982,13 @@ export function ContentPromptStudio({
           setResult(payload);
           // Simulate step completion for UI
           setStepEvents([
-            { step: 1, stepName: "Research", output: "", durationMs: 0 },
-            { step: 2, stepName: "Outline", output: "", durationMs: 0 },
-            { step: 3, stepName: "Draft", output: "", durationMs: 0 },
-            { step: 4, stepName: "Polish", output: "", durationMs: 0 },
+            { step: 1, stepName: "Deep Research", output: "", durationMs: 0 },
+            { step: 2, stepName: "Angle & Blueprint", output: "", durationMs: 0 },
+            { step: 3, stepName: "Scene Outline", output: "", durationMs: 0 },
+            { step: 4, stepName: "Script Writer", output: "", durationMs: 0 },
+            { step: 5, stepName: "QA & Optimize", output: "", durationMs: 0 },
           ]);
-          setCurrentStep(5);
+          setCurrentStep(6);
         } else {
           setError("Không thể tạo nội dung.");
         }
@@ -958,7 +1002,7 @@ export function ContentPromptStudio({
     } finally {
       setIsPending(false);
     }
-  }, [platform, selectedGaps, selectedLessons, dynamicLessonPosts, marketContext, marketSnapshot]);
+  }, [platform, outputMode, selectedGaps, selectedLessons, dynamicLessonPosts, marketContext, marketSnapshot]);
 
   const handleCopy = () => {
     const text =
@@ -981,9 +1025,9 @@ export function ContentPromptStudio({
           Biến insight đối thủ thành kịch bản sản xuất nội dung đẳng cấp
         </h1>
         <p className="mt-3 max-w-4xl text-sm leading-6 text-slate-600">
-          Engine thật sự 4 bước: Research → Outline → Draft → Polish. Mỗi bước
-          là một lời gọi AI riêng biệt, inject đầy đủ dữ liệu crawl đối thủ
-          (engagement, viral patterns, content gaps) vào kịch bản.
+          Engine 5 bước chuyên biệt: Deep Research → Angle Blueprint → Scene
+          Outline → Script Writer → QA Agent. Mỗi bước là một AI agent riêng,
+          chỉ nhận đúng data cần thiết — web search + smart context + word-for-word.
         </p>
       </section>
 
@@ -1405,11 +1449,36 @@ export function ContentPromptStudio({
                   AI Content Generator Pro
                 </h2>
                 <p className="mt-1 text-sm leading-6 text-slate-500">
-                  Engine 4 bước thực: Research → Outline → Draft → Polish. Mỗi
-                  bước là lời gọi AI riêng biệt.
+                  Engine 5 bước: Deep Research → Blueprint → Scene Outline →
+                  Script Writer → QA Agent. Mỗi bước là AI agent riêng biệt.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
+                <div className="flex items-center rounded-lg border border-kolia-line bg-slate-100 p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setOutputMode('video')}
+                    className={`rounded-md px-3 py-1.5 text-xs font-bold transition ${
+                      outputMode === 'video'
+                        ? 'bg-white text-kolia-ink shadow-sm'
+                        : 'text-slate-500 hover:text-kolia-ink'
+                    }`}
+                  >
+                    Video Mode
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOutputMode('post')}
+                    className={`rounded-md px-3 py-1.5 text-xs font-bold transition ${
+                      outputMode === 'post'
+                        ? 'bg-white text-kolia-ink shadow-sm'
+                        : 'text-slate-500 hover:text-kolia-ink'
+                    }`}
+                  >
+                    Post Mode
+                  </button>
+                </div>
+
                 {/* Mode Toggle */}
                 <div className="flex items-center rounded-lg border border-kolia-line bg-slate-100 p-0.5">
                   <button
@@ -1449,8 +1518,10 @@ export function ContentPromptStudio({
                       <Sparkles className="h-4 w-4" />
                     )}
                     {isPending
-                      ? "Đang tạo (3 bước)..."
-                      : "✨ Tạo kịch bản chuyên nghiệp"}
+                      ? "Đang tạo (5 bước)..."
+                      : outputMode === "video"
+                        ? "✨ Tạo kịch bản video"
+                        : "✨ Tạo bài post chuyên nghiệp"}
                   </button>
                 )}
               </div>
@@ -1468,7 +1539,7 @@ export function ContentPromptStudio({
             {/* Manual Mode */}
             {mode === 'manual' && (
               <div className="mt-4 space-y-5">
-                {[1, 2, 3].map((stepNum) => {
+                {[1, 2, 3, 4, 5].map((stepNum) => {
                   const stepResult = manualResults[stepNum];
                   const isCurrent = manualCurrentStep === stepNum;
                   const isPast = stepNum < manualCurrentStep && !!stepResult;
@@ -1526,12 +1597,13 @@ export function ContentPromptStudio({
                                 🪄 Bước này chưa có prompt
                               </p>
                               <p className="text-xs text-indigo-400 mb-4">
-                                Bấm "Tạo prompt" để AI sinh prompt mặc định từ dữ liệu đối thủ,
-                                sau đó bạn có thể chỉnh sửa trước khi thực thi.
+                                Bấm "Thực thi bước" để AI chạy bước này và sinh
+                                prompt + kết quả. Sau đó bạn có thể chỉnh sửa
+                                prompt và thực thi lại.
                               </p>
                               <button
                                 type="button"
-                                onClick={() => executeManualStep(stepNum as 1 | 2 | 3)}
+                                onClick={() => executeManualStep(stepNum as 1 | 2 | 3 | 4 | 5)}
                                 disabled={!configured || isLoading}
                                 className="inline-flex items-center gap-2 rounded bg-indigo-600 px-5 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
                               >
@@ -1540,7 +1612,7 @@ export function ContentPromptStudio({
                                 ) : (
                                   <Sparkles className="h-4 w-4" />
                                 )}
-                                {isLoading ? "Đang tạo prompt..." : "🪄 Tạo prompt"}
+                                {isLoading ? "Đang chạy bước..." : "⚡ Thực thi bước"}
                               </button>
                               {manualError && (
                                 <p className="mt-3 text-xs text-red-500">{manualError}</p>
@@ -1574,7 +1646,7 @@ export function ContentPromptStudio({
                               <div className="flex items-center gap-2">
                                 <button
                                   type="button"
-                                  onClick={() => executeManualStep(stepNum as 1 | 2 | 3)}
+                                  onClick={() => executeManualStep(stepNum as 1 | 2 | 3 | 4 | 5)}
                                   disabled={!configured || isLoading}
                                   className="inline-flex items-center gap-2 rounded bg-kolia-green px-5 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
                                 >
@@ -1617,12 +1689,14 @@ export function ContentPromptStudio({
                       )}
 
                       {/* Next Step Button */}
-                      {isPast && stepNum < 3 && (
+                      {isPast && stepNum < 5 && (
                         <button
                           type="button"
                           onClick={() => {
-                            setManualCurrentStep((stepNum + 1) as 1 | 2 | 3);
-                            loadManualStepPrompt((stepNum + 1) as 1 | 2 | 3);
+                            // Navigate only — user must explicitly click "Thực thi bước"
+                            // to trigger an AI call. loadManualStepPrompt is NOT called here
+                            // to avoid silent token consumption on nav clicks.
+                            setManualCurrentStep((stepNum + 1) as 1 | 2 | 3 | 4 | 5);
                           }}
                           className="mt-3 inline-flex items-center gap-1.5 rounded border border-kolia-green bg-white px-4 py-2 text-xs font-bold text-kolia-green hover:bg-kolia-mint"
                         >
@@ -1631,10 +1705,10 @@ export function ContentPromptStudio({
                         </button>
                       )}
 
-                      {/* Show final result after step 3 */}
-                      {stepNum === 3 && stepResult && (
+                      {/* Show final result after step 5 */}
+                      {stepNum === 5 && stepResult && (
                         <div className="mt-4 rounded border border-amber-200 bg-amber-50 p-3">
-                          <p className="text-xs font-bold text-amber-700">✅ Đã hoàn thành tất cả các bước!</p>
+                          <p className="text-xs font-bold text-amber-700">✅ Đã hoàn thành tất cả 5 bước!</p>
                           <p className="mt-1 text-xs text-amber-600">Kết quả cuối cùng hiển thị bên dưới phần Đánh giá chất lượng.</p>
                         </div>
                       )}
@@ -1647,8 +1721,7 @@ export function ContentPromptStudio({
             <p className="mt-3 text-xs leading-5 text-slate-500">
               Model: <strong>{model}</strong> · Dữ liệu tham khảo:{" "}
               <strong>{lessonPosts.length} bài đối thủ</strong> ·{" "}
-              {selectedGaps.length} gap · Engine inject đầy đủ dữ liệu crawl
-              (engagement, viral patterns, content gaps)
+              {selectedGaps.length} gap · Engine 5 bước: web search + smart context + word-for-word script + QA agent
             </p>
           </section>
 
@@ -1670,6 +1743,38 @@ export function ContentPromptStudio({
           {/* ─── Result ──────────────────────────────────────────── */}
           {item && (
             <>
+              {/* ─── QA Gate Banner ──────────────────────────────── */}
+              {item.qaGateFailed && (
+                <section className="rounded border-2 border-red-400 bg-red-50 p-4 shadow-sm">
+                  <div className="flex items-start gap-3">
+                    <span className="mt-0.5 text-2xl">🚫</span>
+                    <div>
+                      <h3 className="font-bold text-red-700">QA Gate: Nội dung chưa đạt ngưỡng tối thiểu</h3>
+                      <p className="mt-1 text-sm text-red-600">{item.qaGateReason}</p>
+                      <p className="mt-2 text-xs text-red-500">
+                        Nội dung đã được lưu với trạng thái <code className="rounded bg-red-100 px-1 font-mono">qa_failed</code>.
+                        Vui lòng chỉnh sửa hook và thêm data points cụ thể trước khi publish.
+                      </p>
+                    </div>
+                  </div>
+                </section>
+              )}
+              {item.qaGateWarning && !item.qaGateFailed && (
+                <section className="rounded border border-amber-400 bg-amber-50 p-4 shadow-sm">
+                  <div className="flex items-start gap-3">
+                    <span className="mt-0.5 text-2xl">⚠️</span>
+                    <div>
+                      <h3 className="font-bold text-amber-700">QA Gate: Cần review trước khi publish</h3>
+                      <p className="mt-1 text-sm text-amber-600">{item.qaGateReason}</p>
+                      <p className="mt-2 text-xs text-amber-500">
+                        Nội dung đã lưu với trạng thái <code className="rounded bg-amber-100 px-1 font-mono">qa_warning</code>.
+                        Xem xét các Alternative Hooks bên dưới để cải thiện điểm hook.
+                      </p>
+                    </div>
+                  </div>
+                </section>
+              )}
+
               {/* Quality Metrics */}
               <section className="rounded border border-kolia-line bg-white p-5 shadow-sm">
                 <h2 className="mb-4 flex items-center gap-2 font-bold text-kolia-ink">
@@ -1677,6 +1782,7 @@ export function ContentPromptStudio({
                   Đánh giá chất lượng
                 </h2>
                 <QualityMetrics
+                  outputMode={outputMode}
                   hookScore={item.hookScore}
                   qualityChecklist={item.qualityChecklist}
                   retentionRisks={item.retentionRisks}
@@ -1688,11 +1794,11 @@ export function ContentPromptStudio({
                 />
               </section>
 
-              {/* Research Brief (collapsible) */}
+              {/* Research Brief (Step 1) */}
               {item.researchBrief && (
                 <section className="rounded border border-kolia-line bg-white p-5 shadow-sm">
                   <CollapsibleSection
-                    title="📊 Research Brief — Phân tích đối thủ"
+                    title="🔍 Step 1: Deep Research Brief"
                     icon={BarChart3}
                   >
                     <div className="whitespace-pre-wrap font-mono text-sm leading-7 text-slate-700">
@@ -1702,11 +1808,25 @@ export function ContentPromptStudio({
                 </section>
               )}
 
-              {/* Outline (collapsible) */}
+              {/* Blueprint (Step 2) */}
+              {item.blueprint && (
+                <section className="rounded border border-kolia-line bg-white p-5 shadow-sm">
+                  <CollapsibleSection
+                    title="🎯 Step 2: Angle & Blueprint"
+                    icon={Sparkles}
+                  >
+                    <div className="whitespace-pre-wrap font-mono text-sm leading-7 text-slate-700">
+                      {item.blueprint}
+                    </div>
+                  </CollapsibleSection>
+                </section>
+              )}
+
+              {/* Scene Outline (Step 3) */}
               {item.outline && (
                 <section className="rounded border border-kolia-line bg-white p-5 shadow-sm">
                   <CollapsibleSection
-                    title="📋 Outline — Cấu trúc nội dung"
+                    title="📋 Step 3: Scene-by-Scene Outline"
                     icon={Clipboard}
                   >
                     <div className="whitespace-pre-wrap font-mono text-sm leading-7 text-slate-700">

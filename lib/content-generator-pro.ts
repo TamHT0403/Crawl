@@ -1,39 +1,58 @@
 /**
- * PRO Content Generator Engine — Version 3.0
+ * PRO Content Generator Engine — Version 4.0 (Enterprise)
  *
- * TRUE multi-step AI generation pipeline with 4 real OpenAI calls:
- *   Step 1: RESEARCH  — Competitor intelligence analysis (Data Analyst)
- *   Step 2: OUTLINE   — Strategic content architecture (Creative Director)
- *   Step 3: DRAFT     — Expert scriptwriting (Platform Specialist)
- *   Step 4: POLISH    — Quality assurance & optimization (Editor-in-Chief)
+ * 5-Step Specialized Agent Pipeline:
+ *   Step 1: DEEP RESEARCH     — Web search + Smart DB context (lean, topic-focused)
+ *   Step 2: ANGLE BLUEPRINT   — Unique angle + thesis statement (minimal input)
+ *   Step 3: SCENE OUTLINE     — Scene-by-scene detailed structure (blueprint only)
+ *   Step 4: SCRIPT WRITER     — Word-for-word full script (scenes only, no raw data)
+ *   Step 5: QA AGENT          — Objective quality assessment (separate from writer)
  *
- * Flow: Crawl data → Research → Outline → Draft → Polish → Save DB
- *
- * Key improvements over v2:
- *   - 4 real OpenAI calls instead of 1
- *   - All templates (YOUTUBE/TIKTOK/FACEBOOK_STRUCTURE) are actively used
- *   - PRO_SYSTEM_INSTRUCTIONS are actively used in Step 3
- *   - Full competitor data (no truncation)
- *   - platformSummary, gaps, suggestions, viralPatterns all injected
- *   - Proper Vietnamese with diacritics throughout
- *   - SSE streaming via onStepComplete callback
- *   - Appropriate max_output_tokens per step
+ * Key improvements over v3:
+ *   - Mỗi step chỉ nhận data CẦN THIẾT — loại bỏ context dump
+ *   - Smart Context Selector: top-5 posts liên quan thay vì 10-20 posts raw
+ *   - Multi-provider Web Search: tìm kiếm thông tin mới nhất (Tavily/SerpAPI)
+ *   - Context Cache: tránh rebuild DB queries cho mỗi step
+ *   - User-configurable token budget & niche (từ DB settings)
+ *   - Backward-compatible: giữ nguyên exported types và function signatures
  */
 
 import { prisma } from "@/lib/prisma";
 import { getOpenAIClient, getOpenAIModel, isOpenAIConfigured } from "@/lib/openai";
 import { getFilteredPosts, getContentGapAnalytics, getOverviewAnalytics } from "@/lib/analytics";
 import { getBrandVoice, applyBrandVoicePrompt } from "@/lib/brandVoice";
-import type { Platform, ContentType, GenerateBatchInput, GenerateContentResponse, GenerateBatchResponse } from "@/lib/types";
+import type {
+  Platform,
+  ContentType,
+  GenerateBatchInput,
+  GenerateContentResponse,
+  GenerateBatchResponse,
+  GenerationOutputMode,
+} from "@/lib/types";
 import { fetchMarketSnapshot, formatMarketContext } from "@/lib/marketData";
 import type { MarketSnapshot } from "@/lib/marketData";
+import { getConfig } from "@/lib/config";
+import { getCachedProContext, getCachedMarketData, setSessionStep, getSessionOutputs } from "@/lib/contextCache";
+import {
+  // selectTopPosts and compressPostForPrompt are used INTERNALLY by
+  // buildLeanResearchContext — they are NOT dead code, just encapsulated
+  // inside contextSelector.ts. Data flow: competitorPosts → selectTopPosts
+  // (relevance rank) → compressPostForPrompt (token compression) → leanContext.
+  buildLeanResearchContext,
+  extractMarketHighlights,
+} from "@/lib/contextSelector";
+import {
+  enrichWithWebResearch,
+  getContentGenTokenBudget,
+  allocateTokenBudget,
+} from "@/lib/webResearch";
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  TYPE EXPORTS
+//  TYPE EXPORTS (backward compatible)
 // ═══════════════════════════════════════════════════════════════════════════
 
 export type StepResult = {
-  step: 1 | 2 | 3;
+  step: 1 | 2 | 3 | 4 | 5;
   stepName: string;
   output: string;
   prompt: string;
@@ -59,654 +78,710 @@ export type ProGenerateResult = {
   titleVariants?: string[];
   researchBrief?: string;
   outline?: string;
+  blueprint?: string;
   stepsCompleted?: number;
   totalDurationMs?: number;
+  tokenUsage?: Record<string, number>;
+};
+
+export type StepInput = {
+  step: 1 | 2 | 3 | 4 | 5;
+  platform: Platform;
+  outputMode?: GenerationOutputMode;
+  mainTopic: string;
+  marketContext?: string;
+  marketSnapshot?: MarketSnapshot;
+  sessionId?: string; // Dùng cho manual mode — cache step outputs
+  niche?: string; // Lĩnh vực nội dung (vd: "tài chính")
+  // Context from previous steps (manual mode fallback nếu không có sessionId)
+  researchBrief?: string;
+  blueprintRaw?: string;
+  blueprintJSON?: Record<string, unknown>;
+  sceneOutlineRaw?: string;
+  sceneOutlineJSON?: Record<string, unknown>;
+  fullScript?: string;
+  // Backward compat (v3)
+  outlineRaw?: string;
+  outlineJSON?: Record<string, unknown>;
+  // Prompt override (user-edited in manual mode)
+  overriddenSystemInstruction?: string;
+  overriddenUserPrompt?: string;
+  /**
+   * Preview-only mode — build prompt text but do NOT call the AI model.
+   * Used by "Load Prompt" in Manual mode so users can inspect/edit the
+   * prompt before actually running the step (zero token spend).
+   * When true, the returned `output` is always an empty string.
+   */
+  previewOnly?: boolean;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  HELPERS
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Escape special regex characters in a string */
 function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Safely parse JSON from AI output, returns null on failure */
 function safeParseJSON(text: string): Record<string, unknown> | null {
-  try {
-    // Try direct parse first
-    return JSON.parse(text);
-  } catch {
-    // Try to extract JSON object from markdown code blocks or mixed text
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (jsonMatch) {
-      try {
-        return JSON.parse(jsonMatch[1].trim());
-      } catch { /* fall through */ }
-    }
-    // Try to find a top-level JSON object
-    const objectMatch = text.match(/\{[\s\S]*\}/);
-    if (objectMatch) {
-      try {
-        return JSON.parse(objectMatch[0]);
-      } catch { /* fall through */ }
-    }
-    return null;
+  if (!text || typeof text !== "string") return null;
+
+  // 1. Direct parse (fastest — works when model obeys instructions)
+  const trimmed = text.trim().replace(/^\uFEFF/, ""); // strip BOM
+  try { return JSON.parse(trimmed); } catch { /* continue */ }
+
+  // 2. Strip markdown code fences: ```json ... ``` or ``` ... ```
+  const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)```\s*$/);
+  if (fenceMatch) {
+    try { return JSON.parse(fenceMatch[1].trim()); } catch { /* continue */ }
   }
+
+  // 3. Any ```json block anywhere in text
+  const anyFence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (anyFence) {
+    try { return JSON.parse(anyFence[1].trim()); } catch { /* continue */ }
+  }
+
+  // 4. Find the FIRST { and LAST } — extract the outermost JSON object
+  //    This handles cases where the model adds prose before/after the JSON
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    const candidate = trimmed.slice(firstBrace, lastBrace + 1);
+    try { return JSON.parse(candidate); } catch { /* continue */ }
+    // 4b. Try to fix truncated JSON by appending closing braces/brackets
+    const fixAttempts = [`${candidate}]}`, `${candidate}}`];
+    for (const fix of fixAttempts) {
+      try { return JSON.parse(fix); } catch { /* continue */ }
+    }
+  }
+
+  // 5. Find JSON array as fallback (for scenes array at top level)
+  const firstBracket = trimmed.indexOf("[");
+  const lastBracket = trimmed.lastIndexOf("]");
+  if (firstBracket !== -1 && lastBracket > firstBracket) {
+    const candidate = trimmed.slice(firstBracket, lastBracket + 1);
+    try {
+      const arr = JSON.parse(candidate);
+      if (Array.isArray(arr)) return { scenes: arr };
+    } catch { /* continue */ }
+  }
+
+  return null;
 }
 
-/** Format number for display in Vietnamese */
 function fmtNum(n: number | null | undefined): string {
   if (n == null || isNaN(n)) return "N/A";
   return n.toLocaleString("vi-VN");
 }
-
-/** Format engagement rate as percentage */
 function fmtPct(rate: number | null | undefined): string {
   if (rate == null || isNaN(rate)) return "N/A";
   return `${(rate * 100).toFixed(2)}%`;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  PRO SCRIPT TEMPLATES — Used in Step 2 (Outline)
-// ═══════════════════════════════════════════════════════════════════════════
-
-const YOUTUBE_STRUCTURE = `CẤU TRÚC KỊCH BẢN YOUTUBE CHUYÊN NGHIỆP:
-
-📌 PHẦN 1: HOOK & LUẬN ĐIỂM (00:00 - 01:30)
-  • Mở đầu bằng một câu hỏi hoặc tuyên bố gây tranh luận
-  • Đưa ra luận điểm chính của video (thesis statement)
-  • Cho người xem biết họ sẽ học được gì sau video này
-
-📌 PHẦN 2: BỐI CẢNH DỮ LIỆU (01:30 - 04:00)
-  • Trình bày dữ liệu vĩ mô đang chi phối thị trường
-  • So sánh dữ liệu hiện tại với quá khứ (YoY, MoM)
-  • Visual: chart, biểu đồ, số liệu cụ thể
-
-📌 PHẦN 3: FRAMEWORK PHÂN TÍCH (04:00 - 08:00)
-  • Giới thiệu framework 3-5 bước để phân tích vấn đề
-  • Áp dụng framework vào bối cảnh hiện tại
-  • Giải thích logic đằng sau mỗi bước
-
-📌 PHẦN 4: CASE STUDY / BẰNG CHỨNG (08:00 - 12:00)
-  • Đưa ra ví dụ thực tế từ đối thủ hoặc thị trường
-  • Phân tích kết quả dựa trên dữ liệu (không cảm tính)
-  • So sánh trước/sau nếu có
-
-📌 PHẦN 5: KỊCH BẢN THỊ TRƯỜNG (12:00 - 15:00)
-  • Nêu các kịch bản: lạc quan, trung tính, tiêu cực
-  • Xác suất cho mỗi kịch bản dựa trên dữ liệu
-  • Điều kiện để mỗi kịch bản xảy ra
-
-📌 PHẦN 6: KẾT LUẬN & CTA (15:00 - 18:00)
-  • Tổng kết luận điểm chính
-  • Lưu ý rủi ro (disclaimer)
-  • CTA: theo dõi, comment, webinar, checklist
-
-📌 METADATA:
-  • SEO Title (60 ký tự): ...
-  • SEO Description (160 ký tự): ...
-  • Thumbnail Idea: ...
-  • Tags: ...`;
-
-const TIKTOK_STRUCTURE = `CẤU TRÚC KỊCH BẢN TIKTOK 60 GIÂY CHUYÊN NGHIỆP:
-
-⏱ 0-3s: HOOK MẠNH — mở bằng vấn đề cụ thể, gây tò mò
-  • Công thức: "Bạn có biết...?" / "Đừng bao giờ... trước khi..." / Sốc + dữ liệu
-
-⏱ 3-12s: GIỚI THIỆU VẤN ĐỀ — đặt bối cảnh thị trường
-  • Tại sao vấn đề này quan trọng với nhà đầu tư
-  • Dữ liệu nhanh (1-2 con số)
-
-⏱ 12-30s: GIẢI THÍCH TRỌNG TÂM — framework đơn giản
-  • 1 ý chính duy nhất, dễ hiểu
-  • Visual: chữ trên màn hình, biểu đồ đơn giản
-
-⏱ 30-45s: BẰNG CHỨNG / VÍ DỤ — dữ liệu kiểm chứng
-  • Case ngắn hoặc so sánh
-  • Kết luận rút ra
-
-⏱ 45-55s: LƯU Ý RỦI RO — giữ trung lập, giáo dục
-  • Cảnh báo không khuyến nghị đầu tư
-  • Khuyến khích tự nghiên cứu
-
-⏱ 55-60s: CTA — theo dõi, comment, học thêm
-  • "Theo dõi để không bỏ lỡ phân tích hàng tuần"
-
-📌 METADATA:
-  • Caption: ...
-  • Hashtags: ...`;
-
-const FACEBOOK_STRUCTURE = `CẤU TRÚC BÀI FACEBOOK CHUYÊN NGHIỆP:
-
-📰 HEADLINE: Tiêu đề thu hút (dưới 80 ký tự)
-  • Gây chú ý, chứa luận điểm chính
-
-📝 BODY: 3-5 đoạn ngắn, mỗi đoạn 2-3 câu
-  • Đoạn 1: Luận điểm + dữ liệu chính
-  • Đoạn 2: Phân tích / giải thích
-  • Đoạn 3: Bối cảnh thị trường
-  • Đoạn 4: Góc nhìn khác biệt
-  • Đoạn 5: Kết luận + rủi ro
-
-💬 ENGAGEMENT: Câu hỏi kết nối cộng đồng
-  • "Bạn nghĩ sao về...?"
-  • "Theo dõi để cập nhật thêm"
-
-🔖 HASHTAGS: 5-10 hashtag
-
-📌 NẾU LÀ CAROUSEL:
-  • Slide 1: Cover + headline
-  • Slide 2-4: Nội dung chính
-  • Slide 5: Kết luận + CTA`;
-
-const PLATFORM_STRUCTURES: Record<Platform, string> = {
-  youtube: YOUTUBE_STRUCTURE,
-  tiktok: TIKTOK_STRUCTURE,
-  facebook: FACEBOOK_STRUCTURE,
-};
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  PRO SYSTEM INSTRUCTIONS — Used in Step 3 (Draft)
-// ═══════════════════════════════════════════════════════════════════════════
-
-const PRO_SYSTEM_INSTRUCTIONS: Record<Platform, string> = {
-  youtube: `Bạn là chuyên gia content strategy hàng đầu cho kênh tài chính Kolia Phan — phong cách chuyên gia trung lập, dữ liệu là trọng tâm, giáo dục nhà đầu tư cá nhân Việt Nam.
-
-NGUYÊN TẮC VÀNG:
-1. LUẬN ĐIỂM RÕ RÀNG — Mỗi video phải có 1 thesis duy nhất, xuyên suốt
-2. DỮ LIỆU KIỂM CHỨNG — Mọi nhận định phải có số liệu, chart, hoặc nguồn tham khảo
-3. TRUNG LẬP — Không thiên vị mua/bán, trình bày nhiều kịch bản
-4. GIÁO DỤC — Người xem học được framework để tự phân tích
-5. CÓ CẤU TRÚC — Hook → Context → Framework → Case → Scenarios → CTA
-
-QUY TẮC VỀ GIỌNG VĂN:
-- Chuyên gia nhưng dễ hiểu (không dùng thuật ngữ quá chuyên sâu)
-- Dữ liệu dẫn dắt câu chuyện, không cảm tính
-- Tôn trọng người xem, không FOMO, không bán hàng trực tiếp
-- Kết luận luôn kèm lưu ý rủi ro
-
-KHÔNG BAO GIỜ:
-- Đưa khuyến nghị mua/bán cá nhân
-- Hứa hẹn lợi nhuận
-- Dùng FOMO, clickbait
-- Sao chép nội dung đối thủ`,
-
-  tiktok: `Bạn là chuyên gia content TikTok cho Kolia Phan — kênh tài chính giáo dục nhà đầu tư cá nhân. Phong cách: nhanh, gọn, dễ hiểu, có chất lượng.
-
-NGUYÊN TẮC:
-1. 3 giây đầu quyết định — Hook phải cụ thể, có vấn đề
-2. 1 video = 1 ý duy nhất — Đừng nhồi nhét
-3. Dữ liệu trực quan — Số, chart, so sánh
-4. Kết thúc có CTA rõ ràng
-5. Luôn kèm lưu ý rủi ro
-
-CÔNG THỨC HOOK HIỆU QUẢ (chọn 1):
-- Con số gây sốc: "2.000 tỷ đã bốc hơi chỉ trong 1 ngày"
-- Câu hỏi: "Bạn có biết tại sao vàng giảm dù lãi suất giảm?"
-- Cảnh báo: "Đừng mua vàng trước khi xem video này"
-- Lật tẩy: "3 điều mà các KOL tài chính không nói với bạn"`,
-
-  facebook: `Bạn là chuyên gia content Facebook cho Kolia Phan — trang tài chính giáo dục nhà đầu tư cá nhân. Phong cách: chuyên gia sâu sắc, có góc nhìn riêng, dễ chia sẻ.
-
-NGUYÊN TẮC:
-1. HEADLINE gây chú ý trong 2 giây đầu
-2. Nội dung có chiều sâu — không chỉ là tin tức
-3. Dữ liệu kiểm chứng — số liệu cụ thể
-4. Có góc nhìn khác biệt với đám đông
-5. Kêu gọi tương tác (bình luận, chia sẻ)
-6. Luôn kèm rủi ro disclaimer`,
-};
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  PLATFORM CONTENT FORMAT DESCRIPTIONS
-// ═══════════════════════════════════════════════════════════════════════════
-
-const PLATFORM_FORMAT_DESC: Record<Platform, string> = {
-  youtube: "YouTube video dài (12-18 phút), kịch bản chi tiết với timestamps",
-  tiktok: "TikTok video ngắn (45-60 giây), kịch bản súc tích có hook mạnh",
-  facebook: "Facebook post chuyên sâu (3-5 đoạn), có dữ liệu và góc nhìn riêng",
-};
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  PRO CONTEXT BUILDER — Thu thập dữ liệu đối thủ chi tiết (không cắt ngắn)
-// ═══════════════════════════════════════════════════════════════════════════
-
-async function buildProContext(platform: Platform, days = 30) {
-  // 1. Lấy competitor posts cho platform — sorted by engagement, lấy nhiều hơn để có dữ liệu phong phú
-  const competitorPosts = await getFilteredPosts({ platform, days, sortBy: "engagement" }, 20);
-
-  // 2. Lấy content gap analysis
-  const gapData = await getContentGapAnalytics({ days });
-
-  // 3. Lấy overview stats
-  const overview = await getOverviewAnalytics({ days });
-
-  // 4. Lấy brand voice
-  const brandVoice = await getBrandVoice();
-
-  // 5. Phân tích chi tiết từng post — KHÔNG cắt ngắn nội dung
-  const topPostsDetail = competitorPosts.slice(0, 10).map((post, i) => {
-    const postAny = post as any;
-    const transcriptSnippet = postAny.transcript
-      ? `\n  • Lời thoại (Transcript): "${postAny.transcript.slice(0, 1000)}..."`
-      : "";
-    return `[Bài ${i + 1}]
-  • Đối thủ: ${post.competitor.name} (${post.competitor.source === "trong_nuoc" ? "Trong nước" : "Nước ngoài"})
-  • Danh mục: ${post.competitor.category}
-  • Tiêu đề: "${post.title}"
-  • Nội dung: ${post.caption.slice(0, 500)}${transcriptSnippet}
-  • Trụ cột nội dung: ${post.contentPillar || "N/A"}
-  • Loại hook: ${post.hookType || "N/A"}
-  • Định dạng: ${post.format || "N/A"}
-  • Giọng điệu: ${post.toneOfVoice || "N/A"}
-  • Chủ đề chính: ${post.mainTopic || "N/A"}
-  • Loại quảng bá: ${post.promotionType || "N/A"}
-  • Views: ${fmtNum(post.views)}
-  • Likes: ${fmtNum(post.likes)}
-  • Comments: ${fmtNum(post.comments)}
-  • Shares: ${fmtNum(post.shares)}
-  • Tỷ lệ tương tác: ${fmtPct(post.engagementRate)}
-  • Điểm viral: ${post.viralityScore?.toFixed(1) ?? "N/A"}`;
-  }).join("\n\n");
-
-  // 6. Thống kê platform
-  const platformStats = overview.platformEffectiveness.find(p => p.platform === platform);
-  const platformSummary = platformStats
-    ? `• Nền tảng: ${platform.toUpperCase()}
-• Số bài đã thu thập: ${platformStats.postCount}
-• Engagement trung bình: ${platformStats.avgEngagement.toFixed(2)}%
-• Tổng tương tác: ${fmtNum(platformStats.totalInteractions)}
-• Đánh giá hiệu quả: ${platformStats.decision}
-• Insight chiến lược: ${platformStats.insight}`
-    : "• Chưa có đủ dữ liệu thống kê cho nền tảng này";
-
-  // 7. Gap analysis — lấy đầy đủ, không cắt ngắn
-  const relevantGaps = gapData.domestic.gaps.map((g, i) => `${i + 1}. ${g}`).join("\n");
-  const relevantSuggestions = gapData.domestic.suggestions.map((s, i) => `${i + 1}. ${s}`).join("\n");
-  const viralPatterns = gapData.foreign.viralPatterns.map((p, i) => `${i + 1}. ${p}`).join("\n");
-  const commonTopics = gapData.domestic.commonTopics?.slice(0, 8).join(", ") || "";
-  const underusedHighEngagement = gapData.domestic.underusedHighEngagement?.slice(0, 5).join(", ") || "";
-
-  // 8. Foreign formulas (short-form & long-form)
-  const shortFormFormulas = gapData.foreign.shortForm?.slice(0, 3).map((f: any) =>
-    `• "${f.title || f.formula}": ${f.formula || ""} — Đối thủ: ${f.competitor || "N/A"} — Việt hóa: ${f.vietnamized || "N/A"}`
-  ).join("\n") || "Chưa có dữ liệu";
-  const longFormFormulas = gapData.foreign.longForm?.slice(0, 3).map((f: any) =>
-    `• "${f.title || f.formula}": ${f.formula || ""} — Đối thủ: ${f.competitor || "N/A"} — Việt hóa: ${f.vietnamized || "N/A"}`
-  ).join("\n") || "Chưa có dữ liệu";
-
-  // 9. Build brand voice section
-  const brandVoiceSection = applyBrandVoicePrompt(brandVoice, platform);
-
-  return {
-    topPostsDetail,
-    platformSummary,
-    relevantGaps,
-    relevantSuggestions,
-    viralPatterns,
-    commonTopics,
-    underusedHighEngagement,
-    shortFormFormulas,
-    longFormFormulas,
-    brandVoiceSection,
-    brandVoice,
-    competitorPostsCount: competitorPosts.length,
-    gapData,
-  };
+function resolveOutputMode(platform: Platform, outputMode?: GenerationOutputMode): GenerationOutputMode {
+  if (outputMode) return outputMode;
+  return platform === "facebook" ? "post" : "video";
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  STEP 1: RESEARCH — Competitor Intelligence Analysis
+//  PLATFORM STRUCTURES (kept for reference in Step 3 Outline)
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function stepResearch(
+const PLATFORM_SCENE_GUIDE: Record<Platform, string> = {
+  youtube: `YOUTUBE VIDEO (12-18 min) — Scene structure:
+[HOOK] 00:00-01:30 — Mở bằng câu hỏi/tuyên bố gây tranh luận + thesis
+[CONTEXT] 01:30-04:00 — Data vĩ mô + So sánh YoY/MoM
+[FRAMEWORK] 04:00-08:00 — 3-5 bước phân tích với logic rõ ràng
+[EVIDENCE] 08:00-12:00 — Case study + số liệu kiểm chứng
+[SCENARIOS] 12:00-15:00 — Kịch bản lạc quan/trung tính/tiêu cực
+[CTA] 15:00-18:00 — Tổng kết + disclaimer + call-to-action`,
+
+  tiktok: `TIKTOK VIDEO (45-60s) — Scene structure:
+[HOOK] 0-3s — Câu mở cụ thể gây tò mò (con số sốc hoặc câu hỏi)
+[PROBLEM] 3-12s — Đặt bối cảnh + tại sao quan trọng
+[CORE] 12-35s — 1 ý duy nhất, giải thích đơn giản + 1-2 số liệu
+[PROOF] 35-50s — Case ngắn hoặc so sánh
+[CTA] 50-60s — Disclaimer + theo dõi`,
+
+  facebook: `FACEBOOK POST — Paragraph structure:
+[HEADLINE] — Tiêu đề < 80 ký tự, chứa luận điểm + số liệu
+[HOOK_PARA] — Mở bài: vấn đề + tại sao quan trọng ngay hôm nay
+[ANALYSIS_1] — Phân tích + data point chính
+[ANALYSIS_2] — Góc nhìn khác biệt / phản biện
+[CONCLUSION] — Kết luận + lưu ý rủi ro
+[CTA] — Câu hỏi tương tác + hashtags`,
+};
+
+const PLATFORM_FORMAT_DESC: Record<Platform, string> = {
+  youtube: "YouTube video dài (12-18 phút), kịch bản word-for-word với timestamps và B-roll cues",
+  tiktok: "TikTok video ngắn (45-60 giây), kịch bản súc tích từng câu từng chữ",
+  facebook: "Facebook post chuyên sâu (3-5 đoạn), bài viết sẵn sàng đăng",
+};
+
+const PLATFORM_SYSTEM_INSTRUCTIONS: Record<Platform, string> = {
+  youtube: `Bạn là chuyên gia scriptwriter cho kênh nội dung chuyên sâu.
+
+NGUYÊN TẮC VÀNG:
+1. LUẬN ĐIỂM RÕ RÀNG — 1 thesis duy nhất xuyên suốt toàn video
+2. DỮ LIỆU KIỂM CHỨNG — Mọi nhận định phải có số liệu cụ thể
+3. TRUNG LẬP — Trình bày nhiều kịch bản, không thiên vị
+4. GIÁO DỤC — Người xem học được framework để tự phân tích
+5. WORD-FOR-WORD — Viết lời thoại thực tế, KHÔNG viết ghi chú ý tưởng`,
+
+  tiktok: `Bạn là chuyên gia content TikTok với phong cách nhanh, gọn, có chất lượng.
+
+NGUYÊN TẮC:
+1. 3 giây đầu quyết định — Hook phải CỰC KỲ cụ thể
+2. 1 video = 1 ý duy nhất — Không nhồi nhét
+3. Viết từng câu để đọc thành tiếng — Natural flow
+4. WORD-FOR-WORD — Mỗi câu đều sẵn sàng để đọc trước camera`,
+
+  facebook: `Bạn là chuyên gia content Facebook với phong cách chuyên gia sâu sắc, dễ chia sẻ.
+
+NGUYÊN TẮC:
+1. HEADLINE gây chú ý trong 2 giây
+2. Viết bài hoàn chỉnh sẵn sàng đăng — không phải ghi chú
+3. Mỗi đoạn 2-4 câu với câu chuyển mạch rõ ràng
+4. Dữ liệu kiểm chứng — số liệu cụ thể`,
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PRO CONTEXT BUILDER (v4 — cached, lean)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function buildProContext(platform: Platform, days = 30) {
+  const cacheKey = `${platform}-${days}`;
+
+  return getCachedProContext(cacheKey, async () => {
+    const [competitorPosts, gapData, overview, brandVoice] = await Promise.all([
+      getFilteredPosts({ platform, days, sortBy: "engagement" }, 20),
+      getContentGapAnalytics({ days }),
+      getOverviewAnalytics({ days }),
+      getBrandVoice(),
+    ]);
+
+    const platformStats = overview.platformEffectiveness.find((p) => p.platform === platform);
+    const platformSummary = platformStats
+      ? `${platform.toUpperCase()}: ${platformStats.postCount} bài | Eng TB: ${platformStats.avgEngagement.toFixed(2)}% | Quyết định: ${platformStats.decision}`
+      : "Chưa có đủ dữ liệu";
+
+    const gaps = gapData.domestic.gaps ?? [];
+    const suggestions = gapData.domestic.suggestions ?? [];
+    const viralPatterns = gapData.foreign.viralPatterns ?? [];
+    const shortFormFormulas = (gapData.foreign.shortForm ?? []).slice(0, 3).map(
+      (f: { title?: string; formula?: string; competitor?: string; vietnamized?: string }) =>
+        `"${f.title || f.formula}": ${f.formula || ""} — ${f.competitor || "N/A"} → ${f.vietnamized || "N/A"}`
+    );
+    const longFormFormulas = (gapData.foreign.longForm ?? []).slice(0, 3).map(
+      (f: { title?: string; formula?: string; competitor?: string; vietnamized?: string }) =>
+        `"${f.title || f.formula}": ${f.formula || ""} — ${f.competitor || "N/A"} → ${f.vietnamized || "N/A"}`
+    );
+
+    const brandVoiceSection = applyBrandVoicePrompt(brandVoice, platform);
+
+    return {
+      competitorPosts,
+      platformSummary,
+      gaps,
+      suggestions,
+      viralPatterns,
+      shortFormFormulas,
+      longFormFormulas,
+      brandVoice,
+      brandVoiceSection,
+      gapData,
+    };
+  });
+}
+
+// Export for backward compat
+export { buildProContext };
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  STEP 1: DEEP RESEARCH AGENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function stepDeepResearch(
   client: { responses: { create: (params: Record<string, unknown>) => Promise<{ output_text: string }> } },
   model: string,
   platform: Platform,
   mainTopic: string,
-  marketContext: string,
-  ctx: Awaited<ReturnType<typeof buildProContext>>,
+  niche: string,
+  leanContext: string,
+  webContext: string,
+  maxTokens: number,
 ): Promise<{ prompt: string; output: string }> {
-  const systemInstruction = `Bạn là Data Analyst chuyên phân tích nội dung đối thủ trong lĩnh vực tài chính.
+  const systemInstruction = `Bạn là Research Analyst chuyên phân tích content cho lĩnh vực ${niche}.
 
-NHIỆM VỤ: Phân tích toàn bộ dữ liệu đối thủ được cung cấp và tạo báo cáo nghiên cứu chi tiết phục vụ cho việc sản xuất nội dung.
+NHIỆM VỤ DUY NHẤT: Đọc dữ liệu cung cấp và viết RESEARCH BRIEF ngắn gọn, actionable.
 
-YÊU CẦU ĐẦU RA:
-- Viết báo cáo nghiên cứu dạng văn bản có cấu trúc (KHÔNG phải JSON)
-- Sử dụng tiếng Việt có dấu chuẩn
-- Mỗi nhận định phải có số liệu hoặc dẫn chứng cụ thể từ dữ liệu
-- Tập trung vào actionable insights cho nền tảng ${platform.toUpperCase()}`;
+QUY TẮC NGHIÊM NGẶT:
+- Viết tối đa 5 sections, mỗi section tối đa 3 bullet points
+- Mỗi bullet PHẢI có con số/dẫn chứng cụ thể từ data (không nói chung chung)
+- Tập trung vào ${platform.toUpperCase()} — bỏ qua thông tin không liên quan
+- Kết thúc bằng "GÓC NHÌN ĐỀ XUẤT" — 1-2 câu định hướng độc đáo cho chủ đề
 
-  const prompt = `CHỦ ĐỀ CẦN PHÂN TÍCH: "${mainTopic}"
-NỀN TẢNG MỤC TIÊU: ${platform.toUpperCase()}
-${marketContext ? `\nBỐI CẢNH THỊ TRƯỜNG HIỆN TẠI:\n${marketContext}` : ""}
+KHÔNG ĐƯỢC:
+- Viết essay dài dòng
+- Lặp lại data đã có trong input
+- Đưa ra nhận định không có bằng chứng`;
 
-═══════════════════════════════════════
-DỮ LIỆU ĐỐI THỦ (${ctx.competitorPostsCount} bài, sắp xếp theo engagement):
-═══════════════════════════════════════
-${ctx.topPostsDetail}
+  const webSection = webContext
+    ? `\n${webContext}\n`
+    : "\n(Web search: không có dữ liệu — chỉ dùng DB context)\n";
 
-═══════════════════════════════════════
-THỐNG KÊ NỀN TẢNG ${platform.toUpperCase()}:
-═══════════════════════════════════════
-${ctx.platformSummary}
+  const prompt = `CHỦ ĐỀ PHÂN TÍCH: "${mainTopic}"
+NỀN TẢNG: ${platform.toUpperCase()}
+LĨNH VỰC: ${niche}
+${webSection}
+${leanContext}
 
-═══════════════════════════════════════
-PHÂN TÍCH LỖ HỔNG NỘI DUNG (Content Gaps):
-═══════════════════════════════════════
-Lỗ hổng chưa được khai thác:
-${ctx.relevantGaps || "Chưa phát hiện lỗ hổng rõ ràng"}
+─────────────────────────────────────
+YÊU CẦU RESEARCH BRIEF (tối đa 500 từ):
 
-Đề xuất nội dung từ phân tích:
-${ctx.relevantSuggestions || "Chưa có đề xuất"}
-
-Chủ đề phổ biến trong ngành: ${ctx.commonTopics || "N/A"}
-Chủ đề ít dùng nhưng engagement cao: ${ctx.underusedHighEngagement || "N/A"}
-
-═══════════════════════════════════════
-XU HƯỚNG VIRAL TỪ THỊ TRƯỜNG QUỐC TẾ:
-═══════════════════════════════════════
-${ctx.viralPatterns || "Chưa có dữ liệu"}
-
-Công thức video ngắn hiệu quả:
-${ctx.shortFormFormulas}
-
-Công thức video dài hiệu quả:
-${ctx.longFormFormulas}
-
-═══════════════════════════════════════
-YÊU CẦU BÁO CÁO:
-═══════════════════════════════════════
-Hãy phân tích và viết báo cáo nghiên cứu với các phần sau:
-
-1. TOP VIRAL PATTERNS — Những pattern nội dung nào đang tạo engagement cao nhất? Trích dẫn số liệu cụ thể từ dữ liệu.
-
-2. HOOK PATTERNS — Xếp hạng các loại hook theo hiệu quả (dựa trên engagement rate thực tế). Cho ví dụ cụ thể.
-
-3. CONTENT GAPS & CƠ HỘI — Những chủ đề/góc nhìn nào đối thủ chưa khai thác mà có tiềm năng engagement cao?
-
-4. AUDIENCE INSIGHTS — Khán giả phản ứng tốt nhất với loại nội dung nào? (dựa trên comments, shares, engagement patterns)
-
-5. ĐỀ XUẤT CHIẾN LƯỢC — Kolia Phan nên tiếp cận chủ đề "${mainTopic}" từ góc độ nào để tạo sự khác biệt?`;
+## 1. TOP VIRAL PATTERNS (3 patterns đang thắng)
+## 2. HOOK INSIGHTS (loại hook hiệu quả nhất + ví dụ cụ thể)
+## 3. CONTENT GAPS (2-3 cơ hội chưa ai khai thác)
+## 4. DATA POINTS quan trọng nhất từ thị trường
+## 5. GÓC NHÌN ĐỀ XUẤT cho chủ đề "${mainTopic}"`;
 
   const response = await client.responses.create({
     model,
     input: prompt,
     instructions: systemInstruction,
-    max_output_tokens: 2000,
+    max_output_tokens: maxTokens,
   });
 
-  return { prompt: `🧠 System Instruction:\n${systemInstruction}\n\n📝 User Prompt:\n${prompt}`, output: response.output_text };
+  return {
+    prompt: `🧠 System Instruction:\n${systemInstruction}\n\n📝 User Prompt:\n${prompt}`,
+    output: response.output_text,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  STEP 2: OUTLINE — Strategic Content Architecture
+//  STEP 2: ANGLE & BLUEPRINT ARCHITECT
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function stepOutline(
+async function stepAngleBlueprint(
   client: { responses: { create: (params: Record<string, unknown>) => Promise<{ output_text: string }> } },
   model: string,
   platform: Platform,
+  outputMode: GenerationOutputMode,
   mainTopic: string,
-  marketContext: string,
+  niche: string,
   researchBrief: string,
-  ctx: Awaited<ReturnType<typeof buildProContext>>,
+  brandVoiceSummary: string,
+  maxTokens: number,
 ): Promise<{ raw: string; parsed: Record<string, unknown>; prompt: string }> {
-  const structureTemplate = PLATFORM_STRUCTURES[platform];
+  const systemInstruction = `Bạn là Creative Strategist — chuyên tìm GÓC NHÌN ĐỘC ĐÁO cho content ${niche}.
 
-  const systemInstruction = `Bạn là Creative Director chuyên thiết kế cấu trúc nội dung viral cho kênh tài chính.
+NHIỆM VỤ: Dựa trên research brief, chọn 1 angle duy nhất + xây dựng blueprint ngắn gọn.
 
-NHIỆM VỤ: Dựa trên báo cáo nghiên cứu đối thủ và template cấu trúc nền tảng, thiết kế outline chi tiết cho 1 nội dung ${PLATFORM_FORMAT_DESC[platform]}.
-
-YÊU CẦU:
-- CẤM TUYỆT ĐỐI lấy nguyên văn câu mô tả chủ đề/lỗ hổng (ví dụ: "Cập nhật thị trường có tương tác tốt...") để làm tiêu đề chính ("title"). Hãy tự đặt một tiêu đề mới giật tít, khơi gợi tò mò, ngắn gọn (dưới 70 ký tự) và mang tính chuyên môn cao.
-- Outline phải tận dụng insights từ nghiên cứu đối thủ
-- Hook phải viết word-for-word (không chung chung)
-- Mỗi section phải có key points cụ thể
-- Emotional arc phải rõ ràng
-- Trả lời bằng JSON hợp lệ, KHÔNG có markdown code block`;
+QUY TẮC:
+- Title phải giật tít, dưới 70 ký tự, có con số hoặc luận điểm cụ thể
+- Hook phải viết WORD-FOR-WORD (câu thật sự nói trước camera/gõ đầu bài)
+- Emotional arc phải rõ: bắt đầu ở đâu, kết thúc ở đâu về mặt cảm xúc
+- Trả về JSON hợp lệ, KHÔNG có markdown code block`;
 
   const prompt = `CHỦ ĐỀ: "${mainTopic}"
-NỀN TẢNG: ${platform.toUpperCase()} — ${PLATFORM_FORMAT_DESC[platform]}
-${marketContext ? `BỐI CẢNH: ${marketContext}` : ""}
+NỀN TẢNG: ${platform.toUpperCase()} — ${outputMode.toUpperCase()}
+LĨNH VỰC: ${niche}
+BRAND VOICE: ${brandVoiceSummary}
 
-═══════════════════════════════════════
-BÁO CÁO NGHIÊN CỨU ĐỐI THỦ (từ Step 1):
-═══════════════════════════════════════
+RESEARCH BRIEF (từ Step 1):
 ${researchBrief}
 
-═══════════════════════════════════════
-TEMPLATE CẤU TRÚC ${platform.toUpperCase()} (bắt buộc tuân theo):
-═══════════════════════════════════════
-${structureTemplate}
-
-═══════════════════════════════════════
-LỖ HỔNG NỘI DUNG CẦN KHAI THÁC:
-═══════════════════════════════════════
-${ctx.relevantGaps || "Không có lỗ hổng cụ thể"}
-
-ĐỀ XUẤT NỘI DUNG:
-${ctx.relevantSuggestions || "Không có đề xuất cụ thể"}
-
-═══════════════════════════════════════
-YÊU CẦU: Trả về JSON với cấu trúc sau:
-═══════════════════════════════════════
+YÊU CẦU: Trả về JSON:
 {
-  "title": "Tiêu đề chính (tối đa 70 ký tự, có luận điểm rõ ràng)",
-  "titleVariants": ["Biến thể tiêu đề 1", "Biến thể tiêu đề 2", "Biến thể tiêu đề 3"],
-  "thumbnailIdea": "Mô tả ý tưởng thumbnail chi tiết (bố cục, màu sắc, text overlay, biểu cảm)",
-  "hookStrategy": "Viết word-for-word câu hook mở đầu (không chung chung, phải cụ thể với chủ đề)",
-  "sections": [
-    {
-      "time": "00:00-01:30",
-      "title": "Tên section",
-      "keyPoints": ["Điểm chính 1", "Điểm chính 2"],
-      "visualCues": ["Gợi ý hình ảnh/chart"]
-    }
-  ],
-  "emotionalArc": "curiosity → surprise → insight → action",
-  "retentionCheckpoints": ["tại 2 phút: reveal dữ liệu bất ngờ", "tại 5 phút: plot twist"]
+  "title": "Tiêu đề chính (<70 ký tự, có luận điểm + số liệu nếu có)",
+  "titleVariants": ["Biến thể A/B 1", "Biến thể A/B 2", "Biến thể A/B 3"],
+  "angle": "Góc nhìn độc đáo trong 1 câu — tại sao content này khác tất cả đối thủ",
+  "thesis": "Luận điểm chính của toàn bộ content trong 1 câu rõ ràng",
+  "uniqueHook": "Câu hook word-for-word — câu thật sự đọc đầu tiên (không chung chung)",
+  "thumbnailIdea": "Mô tả thumbnail: layout, màu sắc, text overlay, biểu cảm (YouTube) hoặc cover idea (Facebook)",
+  "targetAudience": "Ai là người xem lý tưởng? Họ đang lo lắng gì?",
+  "emotionalArc": "Bắt đầu: [cảm xúc] → Giữa: [cảm xúc] → Kết thúc: [cảm xúc]",
+  "keyMessage": "1 takeaway duy nhất người xem phải nhớ sau khi xem xong"
 }`;
 
   const response = await client.responses.create({
     model,
     input: prompt,
     instructions: systemInstruction,
-    max_output_tokens: 2000,
+    max_output_tokens: maxTokens,
   });
 
   const raw = response.output_text;
-  const parsed = safeParseJSON(raw) || {};
+  const parsed = safeParseJSON(raw) ?? {};
   return { raw, parsed, prompt: `🧠 System Instruction:\n${systemInstruction}\n\n📝 User Prompt:\n${prompt}` };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  STEP 3: DRAFT & POLISH — Scriptwriting + Quality Assessment (MERGED)
+//  STEP 3: SCENE-BY-SCENE OUTLINE
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function stepDraftAndPolish(
+async function stepSceneOutline(
   client: { responses: { create: (params: Record<string, unknown>) => Promise<{ output_text: string }> } },
   model: string,
   platform: Platform,
+  outputMode: GenerationOutputMode,
   mainTopic: string,
-  researchBrief: string,
-  outlineJSON: Record<string, unknown>,
-  outlineRaw: string,
-  realMarketContext: string,
-  ctx: Awaited<ReturnType<typeof buildProContext>>,
-): Promise<{ script: string; metrics: Record<string, unknown>; prompt: string }> {
-  // Use platform-specific PRO_SYSTEM_INSTRUCTIONS + quality assessment role
-  const systemInstruction = PRO_SYSTEM_INSTRUCTIONS[platform] + `
+  blueprint: Record<string, unknown>,
+  marketHighlights: string[],
+  maxTokens: number,
+): Promise<{ raw: string; parsed: Record<string, unknown>; prompt: string }> {
+  const sceneGuide = PLATFORM_SCENE_GUIDE[platform];
 
-NHIỆM VỤ: Viết kịch bản hoàn chỉnh sẵn sàng sản xuất, sau đó TỰ ĐÁNH GIÁ chất lượng.
+  const systemInstruction = `Bạn là Content Architect — chuyên thiết kế cấu trúc nội dung chi tiết từng cảnh.
 
-QUY TẮC VIẾT KỊCH BẢN:
-- Viết word-for-word — đây là lời thoại thực tế, KHÔNG phải tóm tắt
-- Thêm [TIMESTAMP] markers cho từng đoạn
-- Thêm [VISUAL] cues cho editor biết cần hiển thị gì
-- Thêm [B-ROLL] suggestions cho footage bổ sung
-- Mọi số liệu phải dùng DỮ LIỆU THỊ TRƯỜNG REAL-TIME được cung cấp bên dưới — KHÔNG bịa số liệu từ kiến thức cũ
-- Giọng văn tự nhiên như đang nói chuyện, không khô khan
-- Kết thúc LUÔN có lưu ý rủi ro (disclaimer)
+NHIỆM VỤ: Dựa trên blueprint, tạo outline từng cảnh/đoạn CHI TIẾT để writer có thể viết ngay.
 
-SAU KHI VIẾT XONG, thêm dòng ---QUALITY_METRICS--- rồi viết JSON đánh giá.`;
+QUY TẮC TUYỆT ĐỐI:
+- Mỗi scene phải có keyMessage CỤ THỂ (1 câu rõ ràng, không chung chung)
+- dataPoint phải là số liệu thật từ market data được cung cấp (KHÔNG bịa số)
+- visualCue phải đủ cụ thể để editor/đạo diễn hiểu ngay cần làm gì
+- CHỈ TRẢ VỀ JSON THUẦN — KHÔNG có \`\`\`json, KHÔNG có markdown, KHÔNG có text giải thích
+- Bắt đầu output bằng ký tự { và kết thúc bằng }`;
 
-  const outlineForPrompt = Object.keys(outlineJSON).length > 0
-    ? JSON.stringify(outlineJSON, null, 2)
-    : outlineRaw;
+  const blueprintStr = JSON.stringify(blueprint, null, 2);
+  const marketStr = marketHighlights.join("\n");
 
   const prompt = `CHỦ ĐỀ: "${mainTopic}"
-NỀN TẢNG: ${platform.toUpperCase()}
+NỀN TẢNG: ${platform.toUpperCase()} — ${outputMode.toUpperCase()}
 
-═══════════════════════════════════════
-${realMarketContext}
-═══════════════════════════════════════
+BLUEPRINT (từ Step 2):
+${blueprintStr}
 
-═══════════════════════════════════════
-BÁO CÁO NGHIÊN CỨU ĐỐI THỦ:
-═══════════════════════════════════════
-${researchBrief}
+DỮ LIỆU THỊ TRƯỜNG REAL-TIME (dùng cho dataPoint):
+${marketStr}
 
-═══════════════════════════════════════
-OUTLINE ĐÃ ĐƯỢC DUYỆT:
-═══════════════════════════════════════
-${outlineForPrompt}
+CẤU TRÚC NỀN TẢNG CẦN TUÂN THEO:
+${sceneGuide}
 
-═══════════════════════════════════════
-BRAND VOICE CẦN TUÂN THỦ:
-═══════════════════════════════════════
-${ctx.brandVoiceSection}
-
-═══════════════════════════════════════
-CÔNG THỨC NỘI DUNG THAM KHẢO:
-═══════════════════════════════════════
-Video ngắn:
-${ctx.shortFormFormulas}
-
-Video dài:
-${ctx.longFormFormulas}
-
-═══════════════════════════════════════
-YÊU CẦU PHẦN 1 — VIẾT KỊCH BẢN:
-═══════════════════════════════════════
-Viết kịch bản HOÀN CHỈNH với:
-1. Mở đầu bằng hook word-for-word (đã có trong outline)
-2. Mỗi section có [TIMESTAMP], [VISUAL], [B-ROLL] markers
-3. Lời thoại viết đầy đủ — không tóm tắt, không bullet points
-4. SỬ DỤNG SỐ LIỆU THỊ TRƯỜNG REAL-TIME ở trên — đây là data thực, mới nhất
-5. Transitions tự nhiên giữa các sections
-6. Disclaimer rủi ro ở cuối
-7. CTA rõ ràng
-
-═══════════════════════════════════════
-YÊU CẦU PHẦN 2 — ĐÁNH GIÁ CHẤT LƯỢNG:
-═══════════════════════════════════════
-Sau khi viết xong kịch bản, thêm dòng:
----QUALITY_METRICS---
-Rồi viết JSON (không markdown code block):
+YÊU CẦU: Trả về JSON với mảng scenes:
 {
-  "hookScore": 8.5,
-  "retentionRisks": ["tại 3:00 - risk mô tả"],
-  "alternativeHooks": ["Hook 1", "Hook 2", "Hook 3"],
-  "seoTitle": "Tiêu đề SEO (max 60 ký tự)",
-  "seoDescription": "Mô tả SEO (max 160 ký tự)",
-  "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5"],
-  "qualityChecklist": {"hasDataPoints": true, "hasVisualCues": true, "hasRiskDisclaimer": true, "hookStrength": "strong", "estimatedDuration": "12:30"},
-  "keyTakeaways": ["Key 1", "Key 2", "Key 3"],
-  "competitorReferences": ["Ref 1", "Ref 2"],
-  "cta": "Call-to-action"
-}
-
-Bắt đầu viết kịch bản:`;
-
-  const fullPrompt = `🧠 System Instruction:\n${systemInstruction}\n\n📝 User Prompt:\n${prompt}`;
+  "scenes": [
+    {
+      "id": "hook",
+      "timestamp": "00:00-01:30",
+      "sceneName": "Tên cảnh",
+      "keyMessage": "Ý chính của cảnh này trong 1 câu cụ thể",
+      "speakingPoints": ["Điểm cần nói 1", "Điểm cần nói 2"],
+      "dataPoint": "Số liệu cụ thể từ market data để dùng trong cảnh này",
+      "visualCue": "Editor cần hiển thị gì (chart, text overlay, B-roll...)",
+      "transitionTo": "Câu/ý nối sang cảnh tiếp theo"
+    }
+  ],
+  "retentionCheckpoints": ["Tại 2 phút: ...", "Tại 7 phút: ..."],
+  "estimatedDuration": "15:30"
+}`;
 
   const response = await client.responses.create({
     model,
     input: prompt,
     instructions: systemInstruction,
-    max_output_tokens: 6000,
+    max_output_tokens: maxTokens,
   });
 
-  const output = response.output_text;
+  const raw = response.output_text;
+  // Aggressive JSON extraction: strip any leading/trailing text outside {}
+  const parsed = safeParseJSON(raw) ?? {};
 
-  // Parse: split by ---QUALITY_METRICS---
-  const separator = "---QUALITY_METRICS---";
-  const sepIndex = output.indexOf(separator);
-  let script: string;
-  let metrics: Record<string, unknown> = {};
-
-  if (sepIndex !== -1) {
-    script = output.slice(0, sepIndex).trim();
-    const metricsRaw = output.slice(sepIndex + separator.length).trim();
-    metrics = safeParseJSON(metricsRaw) || {};
-  } else {
-    script = output;
-    // Try to extract JSON from the end of the output
-    const lastBrace = output.lastIndexOf("}");
-    const lastOpen = output.lastIndexOf('{"hookScore"');
-    if (lastOpen !== -1 && lastBrace > lastOpen) {
-      const possibleJSON = output.slice(lastOpen, lastBrace + 1);
-      const parsed = safeParseJSON(possibleJSON);
-      if (parsed && parsed.hookScore) {
-        script = output.slice(0, lastOpen).trim();
-        metrics = parsed;
-      }
-    }
+  // Log a warning when parsing failed so we can debug
+  if (!parsed.scenes) {
+    console.warn("[stepSceneOutline] JSON parse produced no scenes. Raw output preview:", raw.slice(0, 300));
   }
 
-  return { script, metrics, prompt: fullPrompt };
+  return { raw, parsed, prompt: `🧠 System Instruction:\n${systemInstruction}\n\n📝 User Prompt:\n${prompt}` };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  STEP 4: WORD-FOR-WORD SCRIPT WRITER
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function stepScriptWriter(
+  client: { responses: { create: (params: Record<string, unknown>) => Promise<{ output_text: string }> } },
+  model: string,
+  platform: Platform,
+  outputMode: GenerationOutputMode,
+  mainTopic: string,
+  blueprint: Record<string, unknown>,
+  sceneOutline: Record<string, unknown>,
+  brandVoiceSection: string,
+  maxTokens: number,
+  sceneOutlineRaw?: string, // Fallback: raw text from Step 3 when JSON parsing failed
+): Promise<{ script: string; prompt: string }> {
+  const isVideo = outputMode === "video";
+
+  const writingRules = isVideo
+    ? `QUY TẮC VIẾT KỊCH BẢN VIDEO (TUYỆT ĐỐI TUÂN THEO):
+1. Viết TỪNG CÂU TỪNG CHỮ như đang nói thật trước camera — KHÔNG viết ý tưởng, KHÔNG bullet points
+2. Thêm [TIMESTAMP: XX:XX] ở đầu mỗi scene
+3. Thêm [VISUAL: mô tả] khi cần editor hiển thị gì
+4. Thêm [B-ROLL: mô tả] cho footage bổ sung
+5. Giọng văn tự nhiên như đang nói chuyện, KHÔNG đọc bài
+6. Luôn kết thúc bằng disclaimer rủi ro + CTA rõ ràng
+7. KHÔNG bịa số liệu — chỉ dùng data đã có trong scene outline`
+    : `QUY TẮC VIẾT BÀI POST (TUYỆT ĐỐI TUÂN THEO):
+1. Viết bài HOÀN CHỈNH sẵn sàng đăng — không phải ghi chú
+2. Headline < 80 ký tự, chứa luận điểm + con số
+3. Mỗi đoạn 2-4 câu, có câu chuyển mạch tự nhiên
+4. Giọng văn mượt, không giáo điều, không quảng cáo
+5. Kết thúc: kết luận + disclaimer + hashtags
+6. KHÔNG bịa số liệu — chỉ dùng data đã có trong scene outline`;
+
+  const systemInstruction = `${PLATFORM_SYSTEM_INSTRUCTIONS[platform]}
+
+${writingRules}`;
+
+  const blueprintStr = `Title: "${blueprint.title || ""}"
+Angle: ${blueprint.angle || ""}
+Thesis: ${blueprint.thesis || ""}
+Hook: "${blueprint.uniqueHook || ""}"
+Emotional Arc: ${blueprint.emotionalArc || ""}`;
+
+  const scenesStr = (() => {
+    const scenes = (sceneOutline.scenes as Array<Record<string, unknown>>) ?? [];
+    if (scenes.length > 0) {
+      // ✅ Normal path: structured scenes from JSON
+      return scenes.map((s, i) =>
+        `[Scene ${i + 1}: ${s.sceneName}]\n` +
+        `- Thời gian: ${s.timestamp || ""}\n` +
+        `- Ý chính: ${s.keyMessage || ""}\n` +
+        `- Data point: ${s.dataPoint || "(không có)"}\n` +
+        `- Visual: ${s.visualCue || ""}\n` +
+        `- Transition: ${s.transitionTo || ""}\n` +
+        `- Speaking points: ${Array.isArray(s.speakingPoints) ? (s.speakingPoints as string[]).join("; ") : ""}`
+      ).join("\n\n");
+    }
+    // ⚠️ Fallback path: JSON parse failed, use raw text from Step 3
+    if (sceneOutlineRaw && sceneOutlineRaw.trim().length > 50) {
+      console.warn("[stepScriptWriter] Using raw scene outline fallback (JSON parse failed)");
+      // Extract just the scenes array portion if possible
+      const scenesMatch = sceneOutlineRaw.match(/"scenes"\s*:\s*(\[[\s\S]*?\](?=\s*[,}]))/);
+      if (scenesMatch) {
+        try {
+          const rawScenes = JSON.parse(scenesMatch[1]) as Array<Record<string, unknown>>;
+          return rawScenes.map((s, i) =>
+            `[Scene ${i + 1}: ${s.sceneName}]\n` +
+            `- Ý chính: ${s.keyMessage || ""}\n` +
+            `- Data point: ${s.dataPoint || "(không có)"}\n` +
+            `- Speaking points: ${Array.isArray(s.speakingPoints) ? (s.speakingPoints as string[]).join("; ") : ""}`
+          ).join("\n\n");
+        } catch { /* continue to raw fallback */ }
+      }
+      // Last resort: pass the raw text directly so writer has SOME structure
+      return `[Raw Scene Outline từ Step 3 — dùng làm cơ sở viết kịch bản]:\n${sceneOutlineRaw.slice(0, 3000)}`;
+    }
+    return "(Không có scene outline — viết dựa trên blueprint và brand voice)"; 
+  })();
+
+  const prompt = `CHỦ ĐỀ: "${mainTopic}"
+NỀN TẢNG: ${platform.toUpperCase()} — ${outputMode.toUpperCase()}
+
+BLUEPRINT:
+${blueprintStr}
+
+${brandVoiceSection}
+
+SCENES CHI TIẾT (từ Step 3):
+${scenesStr}
+
+BẮT ĐẦU VIẾT KỊCH BẢN HOÀN CHỈNH:`;
+
+  const response = await client.responses.create({
+    model,
+    input: prompt,
+    instructions: systemInstruction,
+    max_output_tokens: maxTokens,
+  });
+
+  return {
+    script: response.output_text,
+    prompt: `🧠 System Instruction:\n${systemInstruction}\n\n📝 User Prompt:\n${prompt}`,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  STEP 5: QA AGENT (Objective Quality Assessment)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const QA_JSON_TEMPLATE_VIDEO = `{
+  "hookScore": 8.5,
+  "hookStrength": "strong",
+  "retentionRisks": ["Tại 3:00 — mô tả rủi ro cụ thể"],
+  "alternativeHooks": ["Hook thay thế 1", "Hook thay thế 2", "Hook thay thế 3"],
+  "seoTitle": "Tiêu đề SEO tối ưu (max 60 ký tự)",
+  "seoDescription": "Mô tả SEO (max 160 ký tự)",
+  "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5"],
+  "qualityChecklist": {
+    "hasDataPoints": true,
+    "hasVisualCues": true,
+    "hasRiskDisclaimer": true,
+    "hasTimestamps": true,
+    "hasBRollSuggestions": true,
+    "hasStrongHeadline": true,
+    "hasClearParagraphFlow": true,
+    "hasActionableTakeaways": true,
+    "estimatedDuration": "15:30",
+    "readabilityLevel": "easy"
+  },
+  "keyTakeaways": ["Key 1", "Key 2", "Key 3"],
+  "competitorReferences": ["Ref 1", "Ref 2"],
+  "cta": "Call-to-action cụ thể",
+  "titleVariants": []
+}`;
+
+const QA_JSON_TEMPLATE_POST = `{
+  "hookScore": 8.5,
+  "hookStrength": "strong",
+  "retentionRisks": ["Mô tả điểm cụ thể trong bài có thể khiến người đọc dừng lại"],
+  "alternativeHooks": ["Hook thay thế 1 (dựa trên con số cụ thể)", "Hook thay thế 2 (dựa trên case study)", "Hook thay thế 3 (dựa trên luận điểm tranh luận)"],
+  "seoTitle": "Tiêu đề SEO tối ưu (max 60 ký tự)",
+  "seoDescription": "Mô tả SEO (max 160 ký tự)",
+  "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5"],
+  "qualityChecklist": {
+    "hasDataPoints": true,
+    "hasRiskDisclaimer": true,
+    "hasStrongHeadline": true,
+    "hasClearParagraphFlow": true,
+    "hasActionableTakeaways": true,
+    "hasEngagingCTA": true,
+    "readabilityLevel": "easy"
+  },
+  "keyTakeaways": ["Key 1", "Key 2", "Key 3"],
+  "competitorReferences": ["Tên đối thủ liên quan"],
+  "cta": "Câu hỏi tương tác cụ thể",
+  "titleVariants": []
+}`;
+
+async function stepQAAgent(
+  client: { responses: { create: (params: Record<string, unknown>) => Promise<{ output_text: string }> } },
+  model: string,
+  platform: Platform,
+  outputMode: GenerationOutputMode,
+  fullScript: string,
+  blueprint: Record<string, unknown>,
+  maxTokens: number,
+): Promise<{ metrics: Record<string, unknown>; prompt: string }> {
+  const isPost = outputMode === "post";
+  const QA_JSON_TEMPLATE = isPost ? QA_JSON_TEMPLATE_POST : QA_JSON_TEMPLATE_VIDEO;
+
+  const hookRubric = isPost
+    ? `RUBRIC HOOK SCORE CHO FACEBOOK POST:
+- 9-10: Câu đầu có con số cụ thể + luận điểm gây tranh luận ngay lập tức
+- 7-8: Câu đầu đặt vấn đề rõ + khai thác tâm lý sợ thua lỗ/FOMO của nhà đầu tư
+- 5-6: Câu đầu đặt câu hỏi nhưng chung chung, không có số liệu
+- 3-4: Câu đầu giáo điều hoặc không gây được cảm xúc ngay
+- 1-2: Câu đầu nhạt hoặc không liên quan đến nỗi đau của người đọc`
+    : `RUBRIC HOOK SCORE CHO VIDEO:
+- 9-10: 3 giây đầu có luận điểm tranh luận mạnh + con số cụ thể
+- 7-8: Hook đặt vấn đề rõ, tạo tò mò, có dữ liệu
+- 5-6: Hook đặt câu hỏi nhưng thiếu độ cụ thể hoặc số liệu
+- 3-4: Hook bắt đầu bằng giới thiệu bản thân hoặc chủ đề chung
+- 1-2: Hook mờ hoặc giọng văn báo cáo`;
+
+  const systemInstruction = `Bạn là QA Editor độc lập — đánh giá chất lượng content một cách KHÁCH QUAN.
+
+NHIỆM VỤ: Đọc kịch bản và đánh giá theo các tiêu chí sau.
+
+${hookRubric}
+
+QUY TẮC:
+- Chấm điểm dựa trên THỰC TẾ script — không đánh giá cảm tính
+- retentionRisks: chỉ liệt kê điểm CỤ THỂ trong script có thể khiến người đọc dừng lại
+- alternativeHooks: viết 3 hook KHÁC hoàn toàn (không sửa hook cũ) — mỗi hook phải có con số hoặc luận điểm cụ thể
+- CHỈ TRẢ VỀ JSON THUẦN — bắt đầu bằng { kết thúc bằng } — KHÔNG có text giải thích, KHÔNG có markdown`;
+
+  const prompt = `NỀN TẢNG: ${platform.toUpperCase()} — ${outputMode.toUpperCase()}
+TITLE: "${blueprint.title || ""}"
+ANGLE: ${blueprint.angle || ""}
+
+KỊCH BẢN CẦN ĐÁNH GIÁ:
+${fullScript.slice(0, 4000)}${fullScript.length > 4000 ? "\n...[truncated]" : ""}
+
+Trả về JSON (không có markdown):
+${QA_JSON_TEMPLATE}`;
+
+  const response = await client.responses.create({
+    model,
+    input: prompt,
+    instructions: systemInstruction,
+    max_output_tokens: maxTokens,
+  });
+
+  const metrics = safeParseJSON(response.output_text) ?? {};
+
+  // Auto-compute hookScore nếu AI quên trả về
+  if (metrics.hookScore == null) {
+    const checklist = (metrics.qualityChecklist as Record<string, unknown>) ?? {};
+    const positives = [
+      checklist.hasDataPoints,
+      checklist.hasRiskDisclaimer,
+      checklist.hasStrongHeadline,
+      checklist.hasClearParagraphFlow,
+      checklist.hasActionableTakeaways,
+    ].filter(Boolean).length;
+    metrics.hookScore = Math.min(10, 5 + positives * 0.8);
+  }
+
+  return {
+    metrics,
+    prompt: `🧠 System Instruction:\n${systemInstruction}\n\n📝 User Prompt:\n${prompt}`,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  EXPORTED HELPERS — for manual step execution
 // ═══════════════════════════════════════════════════════════════════════════
 
-export { buildProContext };
-
-export type StepInput = {
-  step: 1 | 2 | 3;
-  platform: Platform;
-  mainTopic: string;
-  marketContext?: string;
-  marketSnapshot?: MarketSnapshot;
-  // For step 2 & 3: context from previous steps
-  researchBrief?: string;
-  outlineRaw?: string;
-  outlineJSON?: Record<string, unknown>;
-  // Prompt override (user-edited)
-  overriddenSystemInstruction?: string;
-  overriddenUserPrompt?: string;
-};
-
 export async function executeStep(
   input: StepInput,
 ): Promise<StepResult & { output: string; parsed?: Record<string, unknown> }> {
-  if (!await isOpenAIConfigured()) {
+  if (!(await isOpenAIConfigured())) {
     throw new Error("OpenAI chưa được cấu hình. Vào Settings để thêm API key.");
   }
 
-  const client = await getOpenAIClient();
+  // ─── Preview-only: use a no-op stub client that captures prompt
+  // ─── without sending any request to the AI provider.
+  let capturedPromptForPreview = "";
+  const noopClient = {
+    responses: {
+      create: async (params: Record<string, unknown>): Promise<{ output_text: string }> => {
+        // Record what the real prompt would have been (for debugging/display)
+        capturedPromptForPreview = String(params.input ?? "");
+        return { output_text: "" };
+      },
+    },
+  };
+
+  const client = input.previewOnly
+    ? (noopClient as unknown as Awaited<ReturnType<typeof getOpenAIClient>>)
+    : await getOpenAIClient();
   const model = await getOpenAIModel();
   const startTime = Date.now();
+  const outputMode = resolveOutputMode(input.platform, input.outputMode);
 
-  // ─── Fetch real-time market data ──────────────────────────────────────
+  // ─── Get token budget ─────────────────────────────────────────────────
+  const totalBudget = await getContentGenTokenBudget();
+  const budget = allocateTokenBudget(totalBudget);
+
+  // ─── Get niche from DB or input ────────────────────────────────────────
+  const niche = input.niche || (await getConfig("content_gen_niche")) || "tài chính";
+
+  // ─── Market data (cached) ──────────────────────────────────────────────
   let snapshot = input.marketSnapshot;
   if (!snapshot) {
-    try { snapshot = await fetchMarketSnapshot(); } catch { /* fallback */ }
+    snapshot = await getCachedMarketData(() => fetchMarketSnapshot().catch(() => null)) ?? undefined;
   }
-  const realMarketContext = snapshot
-    ? formatMarketContext(snapshot)
-    : "(Không có dữ liệu thị trường real-time)";
-  const combinedMarketContext = [
-    realMarketContext,
-    input.marketContext ? `\nBỔ SUNG TỪ NGƯỜI DÙNG:\n${input.marketContext}` : "",
-  ].filter(Boolean).join("\n");
+  const marketHighlights = extractMarketHighlights(snapshot ?? null);
 
-  // ─── Gather context ───────────────────────────────────────────────────
+  // ─── Context (cached DB) ───────────────────────────────────────────────
   const ctx = await buildProContext(input.platform);
+
+  // ─── Resolve session outputs (manual mode) ─────────────────────────────
+  const session = input.sessionId ? getSessionOutputs(input.sessionId) : null;
 
   let output = "";
   let parsed: Record<string, unknown> | undefined;
@@ -715,80 +790,190 @@ export async function executeStep(
 
   switch (input.step) {
     case 1: {
-      stepName = "Nghiên cứu đối thủ";
-      const result = await stepResearch(
-        client, model, input.platform, input.mainTopic, combinedMarketContext, ctx
-      );
-      output = result.output;
-      prompt = result.prompt;
+      stepName = "Deep Research";
 
-      // If user overrides the prompt, re-run with edited prompt
+      // Build lean context
+      const leanCtx = buildLeanResearchContext({
+        platform: input.platform,
+        topic: input.mainTopic,
+        competitorPosts: ctx.competitorPosts as Parameters<typeof buildLeanResearchContext>[0]["competitorPosts"],
+        platformSummary: ctx.platformSummary,
+        gaps: ctx.gaps,
+        suggestions: ctx.suggestions,
+        viralPatterns: ctx.viralPatterns,
+        shortFormFormulas: ctx.shortFormFormulas,
+        longFormFormulas: ctx.longFormFormulas,
+        marketHighlights,
+      });
+
+      // Web research enrichment
+      const webEnrichment = await enrichWithWebResearch(input.mainTopic, niche);
+
       if (input.overriddenUserPrompt) {
-        const sysInst = input.overriddenSystemInstruction || `Bạn là Data Analyst chuyên phân tích nội dung đối thủ trong lĩnh vực tài chính.\n\nNHIỆM VỤ: Phân tích toàn bộ dữ liệu đối thủ được cung cấp và tạo báo cáo nghiên cứu chi tiết phục vụ cho việc sản xuất nội dung.\n\nYÊU CẦU ĐẦU RA:\n- Viết báo cáo nghiên cứu dạng văn bản có cấu trúc (KHÔNG phải JSON)\n- Sử dụng tiếng Việt có dấu chuẩn\n- Mỗi nhận định phải có số liệu hoặc dẫn chứng cụ thể từ dữ liệu\n- Tập trung vào actionable insights cho nền tảng ${input.platform.toUpperCase()}`;
-        const overrideResp = await client.responses.create({
-          model,
-          input: input.overriddenUserPrompt,
-          instructions: sysInst,
-          max_output_tokens: 2000,
+        const sysInst = input.overriddenSystemInstruction ||
+          `Bạn là Research Analyst chuyên phân tích content ${niche}. Viết research brief ngắn gọn với dữ liệu cụ thể.`;
+        const resp = await client.responses.create({
+          model, input: input.overriddenUserPrompt,
+          instructions: sysInst, max_output_tokens: budget.step1,
         });
-        output = overrideResp.output_text;
+        output = resp.output_text;
         prompt = `🧠 System Instruction:\n${sysInst}\n\n📝 User Prompt (edited):\n${input.overriddenUserPrompt}`;
+      } else {
+        const result = await stepDeepResearch(
+          client, model, input.platform, input.mainTopic, niche,
+          leanCtx, webEnrichment.formattedWebContext, budget.step1,
+        );
+        output = result.output;
+        prompt = result.prompt;
+      }
+
+      if (input.sessionId) {
+        setSessionStep(input.sessionId, 1, output, undefined, {
+          platform: input.platform, mainTopic: input.mainTopic, outputMode,
+        });
       }
       break;
     }
+
     case 2: {
-      stepName = "Thiết kế cấu trúc";
-      const brief = input.researchBrief || "";
-      const result = await stepOutline(
-        client, model, input.platform, input.mainTopic, combinedMarketContext, brief, ctx
-      );
-      output = result.raw;
-      parsed = result.parsed;
-      prompt = result.prompt;
+      stepName = "Angle & Blueprint";
+
+      const researchBrief = input.researchBrief
+        || session?.step1
+        || "Chưa có research brief từ Step 1.";
+
+      const brandVoiceSummary = `${ctx.brandVoice.name} — ${ctx.brandVoice.traits.slice(0, 2).join(", ")}`;
 
       if (input.overriddenUserPrompt) {
-        const structureTemplate = PLATFORM_STRUCTURES[input.platform];
-        const sysInst = input.overriddenSystemInstruction || `Bạn là Creative Director chuyên thiết kế cấu trúc nội dung viral cho kênh tài chính.\n\nNHIỆM VỤ: Dựa trên báo cáo nghiên cứu đối thủ và template cấu trúc nền tảng, thiết kế outline chi tiết cho 1 nội dung ${PLATFORM_FORMAT_DESC[input.platform]}.\n\nYÊU CẦU:\n- CẤM TUYỆT ĐỐI lấy nguyên văn câu mô tả chủ đề/lỗ hổng để làm tiêu đề chính.\n- Outline phải tận dụng insights từ nghiên cứu đối thủ\n- Hook phải viết word-for-word (không chung chung)\n- Mỗi section phải có key points cụ thể\n- Emotional arc phải rõ ràng\n- Trả lời bằng JSON hợp lệ, KHÔNG có markdown code block`;
-        const overrideResp = await client.responses.create({
-          model,
-          input: input.overriddenUserPrompt,
-          instructions: sysInst,
-          max_output_tokens: 2000,
+        const sysInst = input.overriddenSystemInstruction ||
+          `Bạn là Creative Strategist. Chọn góc nhìn độc đáo và build blueprint. Trả về JSON.`;
+        const resp = await client.responses.create({
+          model, input: input.overriddenUserPrompt,
+          instructions: sysInst, max_output_tokens: budget.step2,
         });
-        output = overrideResp.output_text;
-        parsed = safeParseJSON(output) || {};
+        output = resp.output_text;
+        parsed = safeParseJSON(output) ?? {};
         prompt = `🧠 System Instruction:\n${sysInst}\n\n📝 User Prompt (edited):\n${input.overriddenUserPrompt}`;
+      } else {
+        const result = await stepAngleBlueprint(
+          client, model, input.platform, outputMode, input.mainTopic, niche,
+          researchBrief, brandVoiceSummary, budget.step2,
+        );
+        output = result.raw;
+        parsed = result.parsed;
+        prompt = result.prompt;
       }
+
+      if (input.sessionId) setSessionStep(input.sessionId, 2, output, parsed);
       break;
     }
+
     case 3: {
-      stepName = "Viết kịch bản & đánh giá";
-      const brief = input.researchBrief || "";
-      const outlineJSON = input.outlineJSON || {};
-      const outlineRaw = input.outlineRaw || "";
-      const result = await stepDraftAndPolish(
-        client, model, input.platform, input.mainTopic, brief,
-        outlineJSON, outlineRaw, realMarketContext, ctx
-      );
-      output = result.script;
-      prompt = result.prompt;
+      stepName = "Scene Outline";
+
+      const blueprintJSON = input.blueprintJSON
+        || (input.outlineJSON ?? null)  // backward compat
+        || session?.step2Parsed
+        || {};
+      const blueprintRaw = input.blueprintRaw || (input.outlineRaw ?? "") || session?.step2 || "";
+
+      const bp = Object.keys(blueprintJSON).length > 0 ? blueprintJSON : (safeParseJSON(blueprintRaw) ?? {});
 
       if (input.overriddenUserPrompt) {
-        const sysInst = input.overriddenSystemInstruction || PRO_SYSTEM_INSTRUCTIONS[input.platform] + `\n\nNHIỆM VỤ: Viết kịch bản hoàn chỉnh sẵn sàng sản xuất, sau đó TỰ ĐÁNH GIÁ chất lượng.\n\nQUY TẮC VIẾT KỊCH BẢN:\n- Viết word-for-word — đây là lời thoại thực tế, KHÔNG phải tóm tắt\n- Thêm [TIMESTAMP] markers cho từng đoạn\n- Thêm [VISUAL] cues cho editor\n- Thêm [B-ROLL] suggestions\n- Mọi số liệu phải dùng DỮ LIỆU THỊ TRƯỜNG REAL-TIME\n- Giọng văn tự nhiên\n- Kết thúc LUÔN có lưu ý rủi ro (disclaimer)\n\nSAU KHI VIẾT XONG, thêm dòng ---QUALITY_METRICS--- rồi viết JSON đánh giá.`;
-        const overrideResp = await client.responses.create({
-          model,
-          input: input.overriddenUserPrompt,
-          instructions: sysInst,
-          max_output_tokens: 6000,
+        const sysInst = input.overriddenSystemInstruction ||
+          `Bạn là Content Architect. Tạo scene outline chi tiết. Trả về JSON.`;
+        const resp = await client.responses.create({
+          model, input: input.overriddenUserPrompt,
+          instructions: sysInst, max_output_tokens: budget.step3,
         });
-        output = overrideResp.output_text;
+        output = resp.output_text;
+        parsed = safeParseJSON(output) ?? {};
         prompt = `🧠 System Instruction:\n${sysInst}\n\n📝 User Prompt (edited):\n${input.overriddenUserPrompt}`;
+      } else {
+        const result = await stepSceneOutline(
+          client, model, input.platform, outputMode, input.mainTopic,
+          bp, marketHighlights, budget.step3,
+        );
+        output = result.raw;
+        parsed = result.parsed;
+        prompt = result.prompt;
       }
+
+      if (input.sessionId) setSessionStep(input.sessionId, 3, output, parsed);
       break;
     }
-  }
 
-  const durationMs = Date.now() - startTime;
+    case 4: {
+      stepName = "Script Writer";
+
+      const blueprintJSON = input.blueprintJSON
+        || (input.outlineJSON ?? null)
+        || session?.step2Parsed
+        || {};
+      const blueprintRaw = input.blueprintRaw || (input.outlineRaw ?? "") || session?.step2 || "";
+      const bp = Object.keys(blueprintJSON).length > 0 ? blueprintJSON : (safeParseJSON(blueprintRaw) ?? {});
+
+      const sceneOutlineJSON = input.sceneOutlineJSON || session?.step3Parsed || {};
+      const sceneOutlineRaw = input.sceneOutlineRaw || session?.step3 || "";
+      const scenes = Object.keys(sceneOutlineJSON).length > 0
+        ? sceneOutlineJSON
+        : (safeParseJSON(sceneOutlineRaw) ?? {});
+
+      if (input.overriddenUserPrompt) {
+        const sysInst = input.overriddenSystemInstruction || PLATFORM_SYSTEM_INSTRUCTIONS[input.platform];
+        const resp = await client.responses.create({
+          model, input: input.overriddenUserPrompt,
+          instructions: sysInst, max_output_tokens: budget.step4,
+        });
+        output = resp.output_text;
+        prompt = `🧠 System Instruction:\n${sysInst}\n\n📝 User Prompt (edited):\n${input.overriddenUserPrompt}`;
+      } else {
+        const result = await stepScriptWriter(
+          client, model, input.platform, outputMode, input.mainTopic,
+          bp, scenes, ctx.brandVoiceSection, budget.step4,
+          sceneOutlineRaw, // ← raw fallback in case JSON parse failed
+        );
+        output = result.script;
+        prompt = result.prompt;
+      }
+
+      if (input.sessionId) setSessionStep(input.sessionId, 4, output);
+      break;
+    }
+
+    case 5: {
+      stepName = "QA & Optimize";
+
+      const fullScript = input.fullScript || session?.step4 || "";
+      const blueprintJSON = input.blueprintJSON || session?.step2Parsed || {};
+
+      if (input.overriddenUserPrompt) {
+        const sysInst = input.overriddenSystemInstruction ||
+          `Bạn là QA Editor độc lập. Đánh giá chất lượng script. Trả về JSON.`;
+        const resp = await client.responses.create({
+          model, input: input.overriddenUserPrompt,
+          instructions: sysInst, max_output_tokens: budget.step5,
+        });
+        output = resp.output_text;
+        parsed = safeParseJSON(output) ?? {};
+        prompt = `🧠 System Instruction:\n${sysInst}\n\n📝 User Prompt (edited):\n${input.overriddenUserPrompt}`;
+      } else {
+        const result = await stepQAAgent(
+          client, model, input.platform, outputMode,
+          fullScript, blueprintJSON, budget.step5,
+        );
+        output = JSON.stringify(result.metrics);
+        parsed = result.metrics;
+        prompt = result.prompt;
+      }
+
+      if (input.sessionId) setSessionStep(input.sessionId, 5, output, parsed);
+      break;
+    }
+
+    default:
+      throw new Error(`Step không hợp lệ: ${(input as { step: number }).step}. Hỗ trợ: 1-5.`);
+  }
 
   return {
     step: input.step,
@@ -796,115 +981,140 @@ export async function executeStep(
     output,
     prompt,
     parsed,
-    durationMs,
+    durationMs: Date.now() - startTime,
   };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  MAIN PIPELINE: generateProContent() — 3-Step Engine with SSE + Market Data
+//  MAIN PIPELINE: generateProContent() — 5-Step Engine
 // ═══════════════════════════════════════════════════════════════════════════
 
 export async function generateProContent(options: {
   platform: Platform;
   contentType: ContentType;
+  outputMode?: GenerationOutputMode;
   mainTopic?: string;
   toneOfVoice?: string;
   marketContext?: string;
   marketSnapshot?: MarketSnapshot;
+  niche?: string;
   onStepComplete?: (result: StepResult) => void;
 }): Promise<ProGenerateResult> {
-  if (!await isOpenAIConfigured()) {
+  if (!(await isOpenAIConfigured())) {
     throw new Error("OpenAI chưa được cấu hình. Vào Settings để thêm API key.");
   }
 
   const client = await getOpenAIClient();
   const model = await getOpenAIModel();
   const pipelineStart = Date.now();
+  const outputMode = resolveOutputMode(options.platform, options.outputMode);
+  const mainTopic = options.mainTopic || "Phân tích thị trường";
+  const niche = options.niche || (await getConfig("content_gen_niche")) || "tài chính";
 
-  const mainTopic = options.mainTopic || "Phân tích thị trường tài chính";
+  // ─── Token budget ──────────────────────────────────────────────────────
+  const totalBudget = await getContentGenTokenBudget();
+  const budget = allocateTokenBudget(totalBudget);
 
-  // ─── Fetch real-time market data ──────────────────────────────────────
+  // ─── Market data (parallel fetch + cache) ─────────────────────────────
   let snapshot = options.marketSnapshot;
   if (!snapshot) {
-    try { snapshot = await fetchMarketSnapshot(); } catch { /* fallback below */ }
+    snapshot = await getCachedMarketData(() => fetchMarketSnapshot().catch(() => null)) ?? undefined;
   }
-  const realMarketContext = snapshot
-    ? formatMarketContext(snapshot)
-    : "(Không có dữ liệu thị trường real-time)";
-  // Combine real data + user-supplied context
-  const combinedMarketContext = [
-    realMarketContext,
-    options.marketContext ? `\nBỔ SUNG TỪ NGƯỜI DÙNG:\n${options.marketContext}` : "",
-  ].filter(Boolean).join("\n");
+  const marketHighlights = extractMarketHighlights(snapshot ?? null);
 
-  // ─── Gather context (DB queries, no AI calls) ────────────────────────
+  // ─── DB Context (cached) ───────────────────────────────────────────────
   const ctx = await buildProContext(options.platform);
 
-  // ─── STEP 1: RESEARCH ────────────────────────────────────────────────
-  const step1Start = Date.now();
-  const step1Result = await stepResearch(
-    client, model, options.platform, mainTopic, combinedMarketContext, ctx
-  );
-  const step1Duration = Date.now() - step1Start;
-  const researchBrief = step1Result.output;
+  // ─── Web research (parallel với context build) ──────────────────────
+  const webEnrichment = await enrichWithWebResearch(mainTopic, niche);
 
-  options.onStepComplete?.({
-    step: 1,
-    stepName: "Nghiên cứu đối thủ",
-    output: researchBrief,
-    prompt: step1Result.prompt,
-    durationMs: step1Duration,
+  // ─── STEP 1: DEEP RESEARCH ────────────────────────────────────────────
+  const s1Start = Date.now();
+  const leanCtx = buildLeanResearchContext({
+    platform: options.platform,
+    topic: mainTopic,
+    competitorPosts: ctx.competitorPosts as Parameters<typeof buildLeanResearchContext>[0]["competitorPosts"],
+    platformSummary: ctx.platformSummary,
+    gaps: ctx.gaps,
+    suggestions: ctx.suggestions,
+    viralPatterns: ctx.viralPatterns,
+    shortFormFormulas: ctx.shortFormFormulas,
+    longFormFormulas: ctx.longFormFormulas,
+    marketHighlights,
   });
 
-  // ─── STEP 2: OUTLINE ─────────────────────────────────────────────────
-  const step2Start = Date.now();
-  const outlineResult = await stepOutline(
-    client, model, options.platform, mainTopic, combinedMarketContext, researchBrief, ctx
+  const step1 = await stepDeepResearch(
+    client, model, options.platform, mainTopic, niche,
+    leanCtx, webEnrichment.formattedWebContext, budget.step1,
   );
-  const step2Duration = Date.now() - step2Start;
+  const s1Dur = Date.now() - s1Start;
+  const researchBrief = step1.output;
 
-  options.onStepComplete?.({
-    step: 2,
-    stepName: "Thiết kế cấu trúc",
-    output: outlineResult.raw,
-    prompt: outlineResult.prompt,
-    durationMs: step2Duration,
-  });
+  options.onStepComplete?.({ step: 1, stepName: "Deep Research", output: researchBrief, prompt: step1.prompt, durationMs: s1Dur });
 
-  // ─── STEP 3: DRAFT & POLISH (MERGED) ─────────────────────────────────
-  const step3Start = Date.now();
-  const draftResult = await stepDraftAndPolish(
-    client, model, options.platform, mainTopic, researchBrief,
-    outlineResult.parsed, outlineResult.raw, realMarketContext, ctx
+  // ─── STEP 2: ANGLE BLUEPRINT ───────────────────────────────────────────
+  const s2Start = Date.now();
+  const brandVoiceSummary = `${ctx.brandVoice.name} — ${ctx.brandVoice.traits.slice(0, 2).join(", ")}`;
+  const step2 = await stepAngleBlueprint(
+    client, model, options.platform, outputMode, mainTopic, niche,
+    researchBrief, brandVoiceSummary, budget.step2,
   );
-  const step3Duration = Date.now() - step3Start;
+  const s2Dur = Date.now() - s2Start;
+  const blueprint = step2.parsed;
 
-  options.onStepComplete?.({
-    step: 3,
-    stepName: "Viết kịch bản & đánh giá",
-    output: draftResult.script,
-    prompt: draftResult.prompt,
-    durationMs: step3Duration,
-  });
+  options.onStepComplete?.({ step: 2, stepName: "Angle & Blueprint", output: step2.raw, prompt: step2.prompt, durationMs: s2Dur });
+
+  // ─── STEP 3: SCENE OUTLINE ─────────────────────────────────────────────
+  const s3Start = Date.now();
+  const step3 = await stepSceneOutline(
+    client, model, options.platform, outputMode, mainTopic,
+    blueprint, marketHighlights, budget.step3,
+  );
+  const s3Dur = Date.now() - s3Start;
+  const sceneOutline = step3.parsed;
+
+  options.onStepComplete?.({ step: 3, stepName: "Scene Outline", output: step3.raw, prompt: step3.prompt, durationMs: s3Dur });
+
+  // ─── STEP 4: SCRIPT WRITER ─────────────────────────────────────────────
+  const s4Start = Date.now();
+  const step4 = await stepScriptWriter(
+    client, model, options.platform, outputMode, mainTopic,
+    blueprint, sceneOutline, ctx.brandVoiceSection, budget.step4,
+    step3.raw, // ← pass raw as fallback in case JSON parsing failed
+  );
+  const s4Dur = Date.now() - s4Start;
+  const fullScript = step4.script;
+
+  options.onStepComplete?.({ step: 4, stepName: "Script Writer", output: fullScript, prompt: step4.prompt, durationMs: s4Dur });
+
+  // ─── STEP 5: QA AGENT ─────────────────────────────────────────────────
+  const s5Start = Date.now();
+  const step5 = await stepQAAgent(
+    client, model, options.platform, outputMode,
+    fullScript, blueprint, budget.step5,
+  );
+  const s5Dur = Date.now() - s5Start;
+  const metrics = step5.metrics;
+
+  options.onStepComplete?.({ step: 5, stepName: "QA & Optimize", output: JSON.stringify(metrics), prompt: step5.prompt, durationMs: s5Dur });
 
   const totalDurationMs = Date.now() - pipelineStart;
 
-  // ─── Assemble final result ───────────────────────────────────────────
-  const metrics = draftResult.metrics;
-  const outline = outlineResult.parsed;
+  // ─── Assemble final result ─────────────────────────────────────────────
+  const title = (blueprint.title as string)
+    || (metrics.seoTitle as string)
+    || mainTopic.slice(0, 80);
 
-  // Title: prefer outline title, then SEO title from metrics, then fallback
-  let title = (outline.title as string) || (metrics.seoTitle as string);
-  if (!title) {
-    title = mainTopic.length > 50
-      ? (mainTopic.split("có")[0]?.trim() || mainTopic.slice(0, 45))
-      : mainTopic;
-  }
+  // Merge titleVariants from blueprint + QA
+  const titleVariants = [
+    ...((blueprint.titleVariants as string[]) ?? []),
+    ...((metrics.titleVariants as string[]) ?? []),
+  ].filter(Boolean).slice(0, 5);
 
   return {
     title: title.slice(0, 100),
-    script: draftResult.script,
-    thumbnailIdea: (outline.thumbnailIdea as string) || undefined,
+    script: fullScript,
+    thumbnailIdea: (blueprint.thumbnailIdea as string) || undefined,
     cta: (metrics.cta as string) || undefined,
     toneOfVoice: options.toneOfVoice || ctx.brandVoice.traits[0] || "Chuyên gia",
     mainTopic,
@@ -917,10 +1127,11 @@ export async function generateProContent(options: {
     seoDescription: (metrics.seoDescription as string) || undefined,
     hashtags: (metrics.hashtags as string[]) || undefined,
     qualityChecklist: (metrics.qualityChecklist as Record<string, unknown>) || undefined,
-    titleVariants: (outline.titleVariants as string[]) || undefined,
+    titleVariants: titleVariants.length ? titleVariants : undefined,
     researchBrief,
-    outline: outlineResult.raw,
-    stepsCompleted: 3,
+    outline: step3.raw,
+    blueprint: step2.raw,
+    stepsCompleted: 5,
     totalDurationMs,
   };
 }
@@ -930,9 +1141,7 @@ export async function generateProContent(options: {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export async function generateProBatch(input: GenerateBatchInput): Promise<GenerateBatchResponse> {
-  if (!await isOpenAIConfigured()) {
-    throw new Error("OpenAI chưa được cấu hình.");
-  }
+  if (!(await isOpenAIConfigured())) throw new Error("OpenAI chưa được cấu hình.");
 
   const items: GenerateContentResponse[] = [];
   const count = input.count ?? 1;
@@ -942,27 +1151,25 @@ export async function generateProBatch(input: GenerateBatchInput): Promise<Gener
       const result = await generateProContent({
         platform: entry.platform,
         contentType: entry.contentType,
+        outputMode: entry.outputMode,
         mainTopic: entry.mainTopic,
         toneOfVoice: entry.toneOfVoice,
         marketContext: input.marketContext,
       });
 
-      // Ensure title is a clean string
       let rawTitle: string;
-      if (typeof result.title === 'object' && result.title !== null) {
+      if (typeof result.title === "object" && result.title !== null) {
         rawTitle = result.mainTopic || "";
       } else {
         rawTitle = String(result.title ?? "");
       }
 
-      // Remove JSON prefix artifacts and duplicate topic phrases
       const cleanTitle = (rawTitle || result.mainTopic || "Phân tích thị trường")
-        .replace(/^[\{\[]+/, '')
+        .replace(/^[{[]+/, "")
         .trim()
-        .replace(new RegExp(`^(${escapeRegex(result.mainTopic?.split(" ")[0] || '')})\\s+\\1`, 'i'), '$1 ')
+        .replace(new RegExp(`^(${escapeRegex(result.mainTopic?.split(" ")[0] || "")})\\s+\\1`, "i"), "$1 ")
         .trim() || result.mainTopic || "Phân tích thị trường";
 
-      // Build comprehensive script document
       const scriptSections = [
         `# ${cleanTitle}`,
         ``,
@@ -970,54 +1177,21 @@ export async function generateProBatch(input: GenerateBatchInput): Promise<Gener
         ``,
         `---`,
       ];
-
       if (result.keyTakeaways?.length) {
-        scriptSections.push(
-          `### 📌 Key Takeaways`,
-          ...result.keyTakeaways.map(k => `- ${k}`),
-          ``,
-        );
+        scriptSections.push(`### 📌 Key Takeaways`, ...result.keyTakeaways.map((k) => `- ${k}`), ``);
       }
-
-      if (result.competitorReferences?.length) {
-        scriptSections.push(
-          `### 🏆 Tham chiếu đối thủ`,
-          ...result.competitorReferences.map(r => `- ${r}`),
-          ``,
-        );
-      }
-
       if (result.alternativeHooks?.length) {
-        scriptSections.push(
-          `### 🎯 Hook thay thế`,
-          ...result.alternativeHooks.map((h, idx) => `${idx + 1}. ${h}`),
-          ``,
-        );
+        scriptSections.push(`### 🎯 Hook thay thế`, ...result.alternativeHooks.map((h, idx) => `${idx + 1}. ${h}`), ``);
       }
-
-      if (result.retentionRisks?.length) {
-        scriptSections.push(
-          `### ⚠️ Rủi ro giữ chân người xem`,
-          ...result.retentionRisks.map(r => `- ${r}`),
-          ``,
-        );
-      }
-
       if (result.hashtags?.length) {
-        scriptSections.push(
-          `### 🏷️ Hashtags`,
-          result.hashtags.join(" "),
-          ``,
-        );
+        scriptSections.push(`### 🏷️ Hashtags`, result.hashtags.join(" "), ``);
       }
-
       if (result.hookScore != null) {
         scriptSections.push(
           `### 📊 Điểm đánh giá`,
           `- Hook Score: ${result.hookScore}/10`,
           `- SEO Title: ${result.seoTitle || "N/A"}`,
-          `- Thời lượng ước tính: ${(result.qualityChecklist?.estimatedDuration as string) || "N/A"}`,
-          `- Tổng thời gian tạo: ${((result.totalDurationMs || 0) / 1000).toFixed(1)}s (${result.stepsCompleted || 4} bước)`,
+          `- Tổng thời gian: ${((result.totalDurationMs || 0) / 1000).toFixed(1)}s (5 bước)`,
           ``,
         );
       }
@@ -1060,7 +1234,7 @@ export async function generateProBatch(input: GenerateBatchInput): Promise<Gener
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  OPTIMIZE — Góp ý & tối ưu lại nội dung
+//  OPTIMIZE — Tối ưu lại nội dung theo góp ý
 // ═══════════════════════════════════════════════════════════════════════════
 
 export type OptimizeStepEvent = {
@@ -1075,152 +1249,77 @@ export async function optimizeContent(options: {
   feedback: string;
   onStep?: (event: OptimizeStepEvent) => void;
 }): Promise<{ title: string; script: string; thumbnailIdea: string | null; cta: string | null }> {
-  if (!await isOpenAIConfigured()) {
-    throw new Error("OpenAI chưa được cấu hình.");
-  }
+  if (!(await isOpenAIConfigured())) throw new Error("OpenAI chưa được cấu hình.");
 
   const pipelineStart = Date.now();
-
-  // 1. Lấy content cũ + context
   const existing = await prisma.generatedContent.findUnique({ where: { id: options.contentId } });
   if (!existing) throw new Error("Không tìm thấy nội dung.");
 
   const platform = existing.platform as Platform;
   const client = await getOpenAIClient();
   const model = await getOpenAIModel();
+  const niche = (await getConfig("content_gen_niche")) || "tài chính";
 
-  // ─── STEP 1: Loading context (brand voice, market data) ────────────────
-  const step1Start = Date.now();
-  options.onStep?.({
-    step: 0,
-    stepName: "Đang tải dữ liệu ngữ cảnh & brand voice",
-    output: "Đang lấy brand voice, thông tin thị trường real-time...",
-    durationMs: 0,
-  });
+  const s1Start = Date.now();
+  options.onStep?.({ step: 0, stepName: "Tải dữ liệu ngữ cảnh", output: "Loading brand voice & market data...", durationMs: 0 });
 
-  const brandVoice = await getBrandVoice();
+  const [brandVoice, snapshot] = await Promise.all([
+    getBrandVoice(),
+    getCachedMarketData(() => fetchMarketSnapshot().catch(() => null)),
+  ]);
   const brandVoiceSection = applyBrandVoicePrompt(brandVoice, platform);
+  const marketContext = snapshot ? formatMarketContext(snapshot) : "(Không có dữ liệu thị trường real-time)";
 
-  let marketContext = "(Không có dữ liệu thị trường real-time)";
-  try {
-    const snapshot = await fetchMarketSnapshot();
-    marketContext = formatMarketContext(snapshot);
-  } catch { /* fallback */ }
+  options.onStep?.({ step: 0, stepName: "✅ Đã tải dữ liệu", output: `Brand: ${brandVoice.name}`, durationMs: Date.now() - s1Start });
 
-  options.onStep?.({
-    step: 0,
-    stepName: "✅ Đã tải dữ liệu ngữ cảnh & brand voice",
-    output: `Brand voice: ${brandVoice.name}\nThị trường: ${marketContext.slice(0, 200)}...`,
-    durationMs: Date.now() - step1Start,
-  });
-
-  // ─── STEP 2: Phân tích góp ý ──────────────────────────────────────────
-  const step2Start = Date.now();
-  options.onStep?.({
-    step: 1,
-    stepName: "Đang phân tích góp ý & xây dựng prompt tối ưu",
-    output: `Góp ý: "${options.feedback}"\nNền tảng: ${platform.toUpperCase()}\nChủ đề: ${existing.mainTopic}`,
-    durationMs: 0,
-  });
-
-  // Build system instruction with brand voice
-  const systemInstruction = `Bạn là chuyên gia tối ưu nội dung. Nhiệm vụ của bạn là cải thiện kịch bản dựa trên góp ý của người dùng.
-
+  const systemInstruction = `Bạn là chuyên gia tối ưu nội dung ${niche}.
 ${brandVoiceSection}
-
 QUY TẮC:
 - Giữ nguyên phong cách và brand voice
 - Cập nhật số liệu thị trường nếu có
-- Giữ nguyên cấu trúc [TIMESTAMP], [VISUAL], [B-ROLL] nếu phù hợp
-- KHÔNG thêm các phần không liên quan đến góp ý
-- Trả về JSON với các trường: title, script, thumbnailIdea, cta`;
+- Giữ markers [TIMESTAMP], [VISUAL], [B-ROLL] nếu phù hợp
+- Trả về JSON: { title, script, thumbnailIdea, cta }`;
 
-  const prompt = `Tôi có một kịch bản content cho ${platform.toUpperCase()} với chủ đề "${existing.mainTopic}":
+  const prompt = `Platform: ${platform.toUpperCase()}, Chủ đề: "${existing.mainTopic}"
 
-═══ KỊCH BẢN HIỆN TẠI ═══
+Thị trường hiện tại: ${marketContext.slice(0, 500)}
+
+Kịch bản hiện tại:
 ${existing.script}
-═══ HẾT ═══
 
-Thông tin thị trường hiện tại:
-${marketContext}
+Góp ý: "${options.feedback}"
 
-Người dùng góp ý:
-"${options.feedback}"
+Tối ưu và trả về JSON:`;
 
-Hãy tối ưu lại kịch bản dựa trên góp ý trên. Trả về JSON:
-{
-  "title": "tiêu đề mới (hoặc giữ nguyên)",
-  "script": "kịch bản đã tối ưu",
-  "thumbnailIdea": "ý tưởng thumbnail mới (hoặc giữ nguyên)",
-  "cta": "CTA mới (hoặc giữ nguyên)"
-}`;
+  options.onStep?.({ step: 1, stepName: "AI đang tối ưu...", output: "", durationMs: 0 });
+  const s3Start = Date.now();
 
-  options.onStep?.({
-    step: 1,
-    stepName: "✅ Đã phân tích góp ý — đang gửi đến AI",
-    output: `Prompt length: ${prompt.length} ký tự\nModel: ${model}`,
-    durationMs: Date.now() - step2Start,
-  });
-
-  // ─── STEP 3: AI tối ưu ────────────────────────────────────────────────
-  const step3Start = Date.now();
-  options.onStep?.({
-    step: 2,
-    stepName: "🤖 AI đang tối ưu nội dung...",
-    output: "Đang gửi request đến OpenAI...",
-    durationMs: 0,
-  });
-
+  const totalBudget = await getContentGenTokenBudget();
   const response = await client.responses.create({
-    model,
-    input: prompt,
+    model, input: prompt,
     instructions: systemInstruction,
-    max_output_tokens: 6000,
+    max_output_tokens: Math.min(Math.round(totalBudget * 0.5), 8000),
   });
 
-  // 4. Parse kết quả
-  const parsed = safeParseJSON(response.output_text) || {};
-  const newTitle = (parsed.title as string) || existing.title;
-  const newScript = (parsed.script as string) || existing.script;
-  const newThumbnail = (parsed.thumbnailIdea as string) ?? existing.thumbnailIdea;
-  const newCta = (parsed.cta as string) ?? existing.cta;
+  const optParsed = safeParseJSON(response.output_text) ?? {};
+  const newTitle = (optParsed.title as string) || existing.title;
+  const newScript = (optParsed.script as string) || existing.script;
+  const newThumbnail = (optParsed.thumbnailIdea as string) ?? existing.thumbnailIdea;
+  const newCta = (optParsed.cta as string) ?? existing.cta;
 
-  options.onStep?.({
-    step: 2,
-    stepName: "✅ AI tối ưu hoàn tất",
-    output: `Tiêu đề: ${newTitle}\nĐộ dài script: ${newScript.length} ký tự`,
-    durationMs: Date.now() - step3Start,
-  });
-
-  // ─── STEP 4: Lưu & hoàn tất ──────────────────────────────────────────
-  const step4Start = Date.now();
-  options.onStep?.({
-    step: 3,
-    stepName: "Đang lưu kết quả vào cơ sở dữ liệu",
-    output: "",
-    durationMs: 0,
-  });
+  options.onStep?.({ step: 1, stepName: "✅ AI hoàn tất", output: `Title: ${newTitle}`, durationMs: Date.now() - s3Start });
 
   await prisma.generatedContent.update({
     where: { id: options.contentId },
     data: {
-      title: newTitle,
-      script: newScript,
-      thumbnailIdea: newThumbnail,
-      cta: newCta,
+      title: newTitle, script: newScript,
+      thumbnailIdea: newThumbnail, cta: newCta,
       feedbackNotes: options.feedback,
       status: existing.status === "published" ? "published" : "draft",
     },
   });
 
-  const totalDurationMs = Date.now() - pipelineStart;
-
-  options.onStep?.({
-    step: 3,
-    stepName: "✅ Hoàn tất!",
-    output: `Tổng thời gian: ${(totalDurationMs / 1000).toFixed(1)}s`,
-    durationMs: Date.now() - step4Start,
-  });
+  options.onStep?.({ step: 2, stepName: "✅ Hoàn tất!", output: `${((Date.now() - pipelineStart) / 1000).toFixed(1)}s`, durationMs: 0 });
 
   return { title: newTitle, script: newScript, thumbnailIdea: newThumbnail, cta: newCta };
 }
@@ -1237,37 +1336,22 @@ export async function autoGenerateProFromSync(syncRunId: string): Promise<Genera
   const topGaps = gapData.domestic.gaps.slice(0, 3);
   const topSuggestions = gapData.domestic.suggestions.slice(0, 3);
 
-  // Xác định platform nào đang hiệu quả nhất để ưu tiên
   const bestPlatform = overview.platformEffectiveness
     .slice()
     .sort((a, b) => b.avgEngagement - a.avgEngagement)[0];
 
   const entries: Array<{ platform: Platform; contentType: ContentType; mainTopic?: string; toneOfVoice?: string }> = [];
 
-  // YouTube script từ gap #1 (ưu tiên)
-  if (topGaps.length > 0) {
-    entries.push({ platform: "youtube", contentType: "script", mainTopic: topGaps[0].slice(0, 100) });
-  }
-
-  // TikTok từ gap #2
-  if (topGaps.length > 1) {
-    entries.push({ platform: "tiktok", contentType: "script", mainTopic: topGaps[1].slice(0, 100) });
-  }
-
-  // YouTube từ suggestion
-  if (topSuggestions.length > 0) {
-    entries.push({ platform: "youtube", contentType: "script", mainTopic: topSuggestions[0].slice(0, 100) });
-  }
-
-  // Facebook post
+  if (topGaps.length > 0) entries.push({ platform: "youtube", contentType: "script", mainTopic: topGaps[0].slice(0, 100) });
+  if (topGaps.length > 1) entries.push({ platform: "tiktok", contentType: "script", mainTopic: topGaps[1].slice(0, 100) });
+  if (topSuggestions.length > 0) entries.push({ platform: "youtube", contentType: "script", mainTopic: topSuggestions[0].slice(0, 100) });
   entries.push({ platform: "facebook", contentType: "post", mainTopic: "Cập nhật thị trường & cơ hội đầu tư" });
 
-  // Thêm content cho platform hiệu quả nhất (nếu chưa có)
-  if (bestPlatform && !entries.some(e => e.platform === bestPlatform.platform)) {
+  if (bestPlatform && !entries.some((e) => e.platform === bestPlatform.platform)) {
     entries.push({
       platform: bestPlatform.platform as Platform,
       contentType: bestPlatform.platform === "tiktok" ? "script" : "post",
-      mainTopic: `Tối ưu nội dung cho ${bestPlatform.platform}`,
+      mainTopic: `Phân tích chuyên sâu ${bestPlatform.platform}`,
     });
   }
 

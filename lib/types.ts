@@ -227,12 +227,21 @@ export type SyncFilters = {
 
 // ─── Content Generation ────────────────────────────────────────────────────
 export type ContentType = "script" | "post" | "carousel" | "caption";
+export type GenerationOutputMode = "video" | "post";
 
-export type ContentStatus = "draft" | "approved" | "scheduled" | "published" | "archived";
+export type ContentStatus =
+  | "draft"
+  | "qa_warning"   // QA gate: low hook score or checklist failures — review before publish
+  | "qa_failed"    // QA gate: below minimum threshold — edit required before publish
+  | "approved"
+  | "scheduled"
+  | "published"
+  | "archived";
 
 export type GenerateContentInput = {
   platform: Platform;
   contentType: ContentType;
+  outputMode?: GenerationOutputMode;
   marketContext?: string;
   gapIds?: string[];
   lessonPostIds?: string[];
@@ -243,6 +252,7 @@ export type GenerateBatchInput = {
   entries: Array<{
     platform: Platform;
     contentType: ContentType;
+    outputMode?: GenerationOutputMode;
     mainTopic?: string;
     toneOfVoice?: string;
   }>;
@@ -258,6 +268,7 @@ export type GenerateContentResponse = {
   contentType: string;
   title: string;
   script: string;
+  outputMode?: GenerationOutputMode;
   thumbnailIdea?: string;
   cta?: string;
   toneOfVoice: string;

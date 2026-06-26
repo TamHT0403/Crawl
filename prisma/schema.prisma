@@ -112,7 +112,7 @@ model GeneratedContent {
   mainTopic     String
   sourceGap     String?   // JSON: content gap IDs đã dùng
   sourcePosts   String?   // JSON: post IDs tham khảo
-  status        String    @default("draft") // draft | approved | scheduled | published | archived
+  status        String    @default("draft") // draft | qa_warning | qa_failed | approved | scheduled | published | archived
   scheduledAt   DateTime? // Lịch đăng bài (dùng cho Content Calendar)
   publishAt     DateTime? // Thời gian đăng thực tế
   publishedUrl  String?   // URL sau khi đã publish (YouTube, FB, TikTok)

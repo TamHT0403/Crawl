@@ -91,6 +91,14 @@ export const CONFIG_REGISTRY: ConfigMeta[] = [
   // ─── Health / Monitoring thresholds ─────────────────────────────
   { key: "health_warning_days", label: "Cảnh báo token (ngày)", description: "Số ngày không cập nhật token trước khi cảnh báo (mặc định: 30)", category: "general", encrypted: false, isSecret: false, envFallback: null, placeholder: "30" },
   { key: "health_expire_days", label: "Hết hạn token (ngày)", description: "Số ngày không cập nhật token trước khi đánh dấu hết hạn (mặc định: 90)", category: "general", encrypted: false, isSecret: false, envFallback: null, placeholder: "90" },
+
+  // ─── Web Research / Content Generator Pro ────────────────────────
+  { key: "web_search_provider", label: "Web Search Provider", description: "Provider tìm kiếm web cho Content Generator Pro (tavily | serpapi | none)", category: "ai", encrypted: false, isSecret: false, envFallback: "WEB_SEARCH_PROVIDER", placeholder: "tavily" },
+  { key: "web_search_api_key", label: "Web Search API Key", description: "API key của provider tìm kiếm web (Tavily hoặc SerpAPI)", category: "ai", encrypted: true, isSecret: true, envFallback: "WEB_SEARCH_API_KEY" },
+  { key: "web_search_max_results", label: "Web Search Max Results", description: "Số kết quả tối đa mỗi lần tìm kiếm web (mặc định: 5)", category: "ai", encrypted: false, isSecret: false, envFallback: null, placeholder: "5" },
+  { key: "web_search_token_budget", label: "Research Token Budget", description: "Token tối đa cho bước Research (mặc định: 2000)", category: "ai", encrypted: false, isSecret: false, envFallback: null, placeholder: "2000" },
+  { key: "content_gen_token_budget", label: "Content Gen Token Budget", description: "Tổng token budget cho toàn bộ pipeline Content Generator Pro (mặc định: 20000, tối đa: 100000)", category: "ai", encrypted: false, isSecret: false, envFallback: null, placeholder: "20000" },
+  { key: "content_gen_niche", label: "Content Niche", description: "Lĩnh vực nội dung (vd: tài chính, công nghệ, bất động sản). Dùng để cá nhân hoá prompt.", category: "ai", encrypted: false, isSecret: false, envFallback: null, placeholder: "tài chính" },
 ];
 
 const CONFIG_KEYS = CONFIG_REGISTRY.map((c) => c.key);
