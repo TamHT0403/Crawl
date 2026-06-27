@@ -1385,12 +1385,18 @@ export function ContentPromptStudio({
                   <div className="mt-2 flex flex-wrap gap-2">
                     {marketSnapshot?.fedRate && (
                       <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700">
-                        🏦 Fed Rate: {marketSnapshot.fedRate.rate}%
+                        🏦 Fed Rate: {marketSnapshot.fedRate.rate}% ({(() => {
+                          const parts = marketSnapshot.fedRate.date.split("-");
+                          return parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : marketSnapshot.fedRate.date;
+                        })()})
                       </span>
                     )}
                     {marketSnapshot?.cpiLatest && (
                       <span className="rounded-full bg-purple-50 px-3 py-1 text-xs font-bold text-purple-700">
-                        📊 CPI: {marketSnapshot.cpiLatest.value} ({marketSnapshot.cpiLatest.date})
+                        📊 CPI: {marketSnapshot.cpiLatest.value} ({(() => {
+                          const parts = marketSnapshot.cpiLatest.date.split("-");
+                          return parts.length >= 2 ? `Tháng ${parts[1]}/${parts[0]}` : marketSnapshot.cpiLatest.date;
+                        })()})
                       </span>
                     )}
                   </div>

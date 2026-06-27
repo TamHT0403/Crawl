@@ -54,6 +54,9 @@ model Post {
   @@index([platform])
   @@index([contentPillar])
   @@index([publishedAt])
+  @@index([platform, publishedAt])
+  @@index([competitorId, publishedAt])
+  @@index([platform, engagementRate(sort: Desc)])
 }
 
 model InsightReport {

@@ -282,10 +282,12 @@ export function formatMarketContext(snapshot: MarketSnapshot): string {
 
   // Fed & CPI
   if (snapshot.fedRate) {
-    parts.push(`• Fed Funds Rate: ${snapshot.fedRate.rate}% (ngày ${snapshot.fedRate.date})`);
+    const [y, m, d] = snapshot.fedRate.date.split("-");
+    parts.push(`• Fed Funds Rate: ${snapshot.fedRate.rate}% (ngày ${d}/${m}/${y})`);
   }
   if (snapshot.cpiLatest) {
-    parts.push(`• CPI Mỹ mới nhất: ${snapshot.cpiLatest.value} (tháng ${snapshot.cpiLatest.date})`);
+    const [y, m] = snapshot.cpiLatest.date.split("-");
+    parts.push(`• CPI Mỹ mới nhất: ${snapshot.cpiLatest.value} (tháng ${m}/${y})`);
   }
 
   // News headlines

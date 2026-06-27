@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { getConfig } from "@/lib/config";
+import { isAiQuotaExhausted } from "@/lib/aiQuota";
 
 // ─── Provider config map ───────────────────────────────────────────────────
 type ProviderInfo = {
@@ -294,6 +295,15 @@ export async function callAI(
   messages: { role: "system" | "user" | "assistant"; content: string }[],
   options?: { maxTokens?: number; model?: string },
 ): Promise<string> {
+  // Kiểm tra quota trước khi gọi AI
+  const provider = await getActiveProvider();
+  const quotaExhausted = await isAiQuotaExhausted(provider);
+  if (quotaExhausted) {
+    throw new Error(
+      `⚠️ ${provider} đã hết hạn mức API. Vào Settings → API Keys để kiểm tra và cập nhật key.`,
+    );
+  }
+
   const client = await getAIClient(false);
   const model = options?.model || (await getAIModel());
 

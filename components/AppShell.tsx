@@ -1,8 +1,10 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  AlertTriangle,
   Brain,
   CalendarDays,
   FileText,
@@ -18,6 +20,7 @@ import {
   Sparkles,
   Swords,
   Users,
+  X,
   Youtube
 } from "lucide-react";
 import { SyncDataButton } from "@/components/SyncDataButton";
@@ -78,11 +81,50 @@ const flatNavItems = navSections.flatMap((s) => s.items);
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const [quotaExhausted, setQuotaExhausted] = useState(false);
+  const [quotaMsg, setQuotaMsg] = useState("");
+  const [quotaDismissed, setQuotaDismissed] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/ai/verify")
+      .then(r => r.json())
+      .then(data => {
+        if (data.exhausted) {
+          setQuotaExhausted(true);
+          setQuotaMsg(data.error || `⚠️ ${data.provider} đã hết hạn mức API.`);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const showBanner = quotaExhausted && !quotaDismissed;
 
   return (
     <div className="min-h-screen">
+      {/* Quota warning banner */}
+      {showBanner && (
+        <div className="fixed inset-x-0 top-0 z-50 flex items-center gap-3 bg-red-600 px-4 py-2.5 text-sm text-white shadow-lg"
+          style={{ height: 44 }}
+        >
+          <AlertTriangle className="h-5 w-5 shrink-0" />
+          <p className="flex-1 text-sm font-medium">{quotaMsg}</p>
+          <Link
+            href="/settings"
+            className="shrink-0 rounded bg-white/20 px-3 py-1 text-xs font-bold hover:bg-white/30 transition"
+          >
+            Settings
+          </Link>
+          <button onClick={() => setQuotaDismissed(true)} className="shrink-0 rounded p-1 hover:bg-white/20">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       <GlobalSyncStatus />
-      <header className="fixed inset-x-0 top-0 z-40 border-b border-kolia-line/80 bg-white/90 backdrop-blur">
+      <header
+        className="fixed inset-x-0 z-40 border-b border-kolia-line/80 bg-white/90 backdrop-blur transition-all"
+        style={{ top: showBanner ? 44 : 0 }}
+      >
         <div className="flex h-16 items-center justify-between px-4 md:px-6">
           <Link href="/" className="flex min-w-0 items-center gap-3">
             <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded bg-kolia-ink text-sm font-bold text-kolia-gold">
@@ -158,7 +200,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
 
-      <main className="px-4 pb-10 pt-32 md:ml-72 md:px-8 md:pt-24">{children}</main>
+      <main className={cn("px-4 pb-10 md:ml-72 md:px-8 transition-all", showBanner ? "pt-[116px] md:pt-[108px]" : "pt-32 md:pt-24")}>{children}</main>
     </div>
   );
 }

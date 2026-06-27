@@ -43,6 +43,11 @@ const CONFIG_HELP: Record<string, { steps: string[]; url?: string; urlLabel?: st
   fb_page_access_token: { steps: ["Mở developers.facebook.com/tools/explorer", "Chọn App + Page, lấy token"], url: "https://developers.facebook.com/tools/explorer", urlLabel: "Graph API Explorer" },
 };
 
+// Model keys: các config key dạng {provider}_model (openai_model, gemini_model, ...)
+const MODEL_KEY_SUFFIX = "_model";
+const isModelKey = (key: string) => key.endsWith(MODEL_KEY_SUFFIX) && key !== "ai_provider";
+const providerFromModelKey = (key: string) => key.replace(MODEL_KEY_SUFFIX, "");
+
 // ═════════════════════════════════════════════════════════════════════════════
 //  MAIN
 // ═════════════════════════════════════════════════════════════════════════════
@@ -108,6 +113,63 @@ function ApiKeysTab({ onMsg }: { onMsg: (m: any) => void }) {
   const [pending, startTransition] = useTransition();
   const fetched = useRef(false);
 
+  // ─── Dynamic model loading ────────────────────────────────────────
+  const [dynamicModels, setDynamicModels] = useState<Record<string, { id: string; name: string }[]>>({});
+  const [modelLoadState, setModelLoadState] = useState<Record<string, "idle" | "loading" | "loaded" | "error">>({});
+  const [modelLoadError, setModelLoadError] = useState<Record<string, string>>({});
+  const loadingTrack = useRef<Set<string>>(new Set());
+
+  // ─── Quota checking ────────────────────────────────────────────
+  const [quotaStatus, setQuotaStatus] = useState<{
+    provider: string;
+    valid: boolean;
+    quotaAvailable: boolean;
+    remaining: number | null;
+    used: number | null;
+    total: number | null;
+    unit: string | null;
+    exhausted: boolean;
+    error?: string;
+  } | null>(null);
+  const [quotaLoading, setQuotaLoading] = useState(false);
+  const quotaFetched = useRef(false);
+
+  const checkQuota = async (provider: string, forceRefresh = false) => {
+    setQuotaLoading(true);
+    try {
+      const params = new URLSearchParams({ provider });
+      if (forceRefresh) params.set("refresh", "true");
+      const res = await fetch(`/api/ai/verify?${params.toString()}`);
+      const data = await res.json();
+      setQuotaStatus(data);
+    } catch {
+      setQuotaStatus(null);
+    } finally {
+      setQuotaLoading(false);
+    }
+  };
+
+  const loadModels = async (provider: string, modelKey: string) => {
+    if (loadingTrack.current.has(modelKey)) return;
+    loadingTrack.current.add(modelKey);
+    setModelLoadState(prev => ({ ...prev, [modelKey]: "loading" }));
+    try {
+      const res = await fetch(`/api/ai/models?provider=${provider}`);
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(errData.error || `Lỗi ${res.status}`);
+      }
+      const data = await res.json();
+      setDynamicModels(prev => ({ ...prev, [modelKey]: data.models || [] }));
+      setModelLoadState(prev => ({ ...prev, [modelKey]: "loaded" }));
+    } catch (err: any) {
+      setModelLoadError(prev => ({ ...prev, [modelKey]: err.message }));
+      setModelLoadState(prev => ({ ...prev, [modelKey]: "error" }));
+    } finally {
+      loadingTrack.current.delete(modelKey);
+    }
+  };
+
   useEffect(() => {
     if (fetched.current) return;
     fetched.current = true;
@@ -137,12 +199,27 @@ function ApiKeysTab({ onMsg }: { onMsg: (m: any) => void }) {
     return g;
   }, [items, activeProviderKeys.join(",")]);
 
+  // Auto-check quota khi load xong config
+  useEffect(() => {
+    if (!fetched.current || loading) return;
+    if (quotaFetched.current) return;
+    const hasKey = items.find(c => c.key === `${activeAiProvider}_api_key`)?.hasValue;
+    if (!hasKey) return;
+    quotaFetched.current = true;
+    checkQuota(activeAiProvider);
+  }, [loading, items, activeAiProvider]);
+
   const reload = async () => { const d = await fetch("/api/config").then(r => r.json()); setItems(d.configs ?? []); };
 
   const save = (key: string) => {
     startTransition(async () => {
       await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save", key, value: editVal }) });
       setEditing(null); onMsg({ type: "success", text: "✅ Đã lưu" }); await reload();
+      // Refresh quota nếu vừa lưu API key
+      if (key.endsWith("_api_key") || key === "ai_provider") {
+        const prov = key === "ai_provider" ? editVal : key.replace("_api_key", "");
+        checkQuota(prov, true);
+      }
     });
   };
 
@@ -169,6 +246,31 @@ function ApiKeysTab({ onMsg }: { onMsg: (m: any) => void }) {
               {cat === "openai" && activeAiProvider ? (
                 <span className="text-[10px] font-semibold text-kolia-green mr-2">({({ openai: "OpenAI", gemini: "Gemini", groq: "Groq", openrouter: "OpenRouter", huggingface: "HuggingFace" } as Record<string, string>)[activeAiProvider] || activeAiProvider})</span>
               ) : null}
+              {cat === "openai" && quotaStatus && (
+                <span className={cn(
+                  "rounded px-1.5 py-0.5 text-[10px] font-bold whitespace-nowrap mr-1",
+                  quotaStatus.exhausted ? "bg-red-100 text-red-700" :
+                  quotaStatus.valid ? "bg-green-100 text-green-700" :
+                  "bg-amber-100 text-amber-700"
+                )}>
+                  {quotaLoading ? (
+                    <Loader2 className="inline h-3 w-3 animate-spin" />
+                  ) : quotaStatus.exhausted ? (
+                    "⚠️ Hết quota"
+                  ) : quotaStatus.quotaAvailable && quotaStatus.remaining !== null ? (
+                    `${quotaStatus.remaining.toFixed(1)} ${quotaStatus.unit}`
+                  ) : quotaStatus.valid ? (
+                    "✅ Key hợp lệ"
+                  ) : (
+                    "❌ Key lỗi"
+                  )}
+                </span>
+              )}
+              {cat === "openai" && quotaLoading && !quotaStatus && (
+                <span className="mr-1">
+                  <Loader2 className="inline h-3 w-3 animate-spin text-slate-400" />
+                </span>
+              )}
               <span className="text-xs text-slate-400">{configs.filter(c => !c.hasValue).length} thiếu</span>
               <svg className={cn("h-4 w-4 text-slate-400 transition-transform", isCollapsed ? "" : "rotate-180")} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg>
             </button>
@@ -217,6 +319,96 @@ function ApiKeysTab({ onMsg }: { onMsg: (m: any) => void }) {
                                     <option value="openrouter">OpenRouter</option>
                                     <option value="huggingface">HuggingFace</option>
                                   </select>
+                                ) : isModelKey(item.key) ? (
+                                  <div className="flex w-full items-center gap-1">
+                                    {/* Loading state */}
+                                    {modelLoadState[item.key] === "loading" && (
+                                      <div className="flex items-center gap-2 flex-1">
+                                        <Loader2 className="h-4 w-4 animate-spin text-kolia-green" />
+                                        <span className="text-xs text-slate-500">Đang tải danh sách model…</span>
+                                      </div>
+                                    )}
+
+                                    {/* Error state */}
+                                    {modelLoadState[item.key] === "error" && (
+                                      <div className="flex flex-col gap-1 flex-1">
+                                        <div className="flex items-center gap-1">
+                                          <input
+                                            type="text"
+                                            value={editVal}
+                                            onChange={(e) => setEditVal(e.target.value)}
+                                            placeholder="Nhập tên model…"
+                                            className="h-8 flex-1 rounded-lg border border-kolia-line px-3 text-sm outline-none focus:border-kolia-green focus:ring-2 focus:ring-kolia-mint"
+                                            autoFocus
+                                          />
+                                          <button
+                                            onClick={() => loadModels(providerFromModelKey(item.key), item.key)}
+                                            className="shrink-0 rounded-lg border border-kolia-line px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                                            title="Thử lại"
+                                          >
+                                            🔄
+                                          </button>
+                                        </div>
+                                        <p className="text-[10px] text-red-500 leading-tight">{modelLoadError[item.key]}</p>
+                                      </div>
+                                    )}
+
+                                    {/* Loaded state: dropdown */}
+                                    {modelLoadState[item.key] === "loaded" && dynamicModels[item.key] && (
+                                      <div className="flex w-full gap-1">
+                                        <select
+                                          value={dynamicModels[item.key]?.some(m => m.id === editVal) ? editVal : "__custom__"}
+                                          onChange={(e) => {
+                                            const v = e.target.value;
+                                            if (v === "__custom__") {
+                                              if (dynamicModels[item.key]?.some(m => m.id === editVal)) setEditVal("");
+                                            } else {
+                                              setEditVal(v);
+                                            }
+                                          }}
+                                          className="h-8 flex-1 rounded-lg border border-kolia-line px-3 text-sm outline-none focus:border-kolia-green focus:ring-2 focus:ring-kolia-mint w-full"
+                                          autoFocus
+                                        >
+                                          <option value="" disabled>Chọn model…</option>
+                                          {dynamicModels[item.key]?.map((m) => (
+                                            <option key={m.id} value={m.id}>{m.name}</option>
+                                          ))}
+                                          <option value="__custom__">✏️ Nhập model khác…</option>
+                                        </select>
+                                        {(!dynamicModels[item.key]?.some(m => m.id === editVal)) && (
+                                          <input
+                                            type="text"
+                                            value={editVal}
+                                            onChange={(e) => setEditVal(e.target.value)}
+                                            placeholder="Nhập tên model…"
+                                            className="h-8 flex-1 rounded-lg border border-kolia-line px-3 text-sm outline-none focus:border-kolia-green focus:ring-2 focus:ring-kolia-mint"
+                                            autoFocus
+                                          />
+                                        )}
+                                      </div>
+                                    )}
+
+                                    {/* Idle state (chưa load): show text input + load button */}
+                                    {(!modelLoadState[item.key] || modelLoadState[item.key] === "idle") && (
+                                      <div className="flex w-full gap-1">
+                                        <input
+                                          type="text"
+                                          value={editVal}
+                                          onChange={(e) => setEditVal(e.target.value)}
+                                          placeholder="Nhập tên model…"
+                                          className="h-8 flex-1 rounded-lg border border-kolia-line px-3 text-sm outline-none focus:border-kolia-green focus:ring-2 focus:ring-kolia-mint"
+                                          autoFocus
+                                        />
+                                        <button
+                                          onClick={() => loadModels(providerFromModelKey(item.key), item.key)}
+                                          className="shrink-0 rounded-lg border border-kolia-line px-2.5 py-1 text-xs font-semibold text-kolia-green hover:bg-kolia-mint"
+                                          title="Tải danh sách model từ API"
+                                        >
+                                          📡 Load
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
                                 ) : (
                                   <input type={item.isSecret && !isVisible ? "password" : "text"} value={editVal}
                                     onChange={(e) => setEditVal(e.target.value)}
@@ -259,12 +451,28 @@ function ApiKeysTab({ onMsg }: { onMsg: (m: any) => void }) {
                                     <HelpCircle className="h-4 w-4" />
                                   </button>
                                 )}
+                                {item.key.endsWith("_api_key") && item.hasValue && (
+                                  <button
+                                    onClick={() => {
+                                      const prov = item.key.replace("_api_key", "");
+                                      checkQuota(prov, true);
+                                    }}
+                                    className="rounded p-1.5 text-slate-400 hover:bg-slate-100 hover:text-kolia-green"
+                                    title="Kiểm tra API key & quota"
+                                  >
+                                    {quotaLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                                  </button>
+                                )}
                                 {item.isSecret && item.hasValue && (
                                   <button onClick={() => setShowSecret(isVisible ? null : item.key)} className="rounded p-1.5 text-slate-400 hover:text-slate-600" title={isVisible ? "Ẩn" : "Hiện"}>
                                     {isVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                                   </button>
                                 )}
-                                <button onClick={() => { setEditing(item.key); setEditVal(item.value || ""); }} className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-kolia-ink" title="Sửa">
+                                <button onClick={() => {
+                                  setEditing(item.key);
+                                  setEditVal(item.value || "");
+                                  if (isModelKey(item.key)) loadModels(providerFromModelKey(item.key), item.key);
+                                }} className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-kolia-ink" title="Sửa">
                                   <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
                                 </button>
                                 {item.source === "db" && (

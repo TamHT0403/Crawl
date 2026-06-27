@@ -1,42 +1,69 @@
-import { NextResponse } from "next/server";
 import { answerQuestion } from "@/lib/nlQuery";
-import type { NLQueryRequest } from "@/lib/types";
+import { type NLQueryRequest } from "@/lib/types";
 
 export const runtime = "nodejs";
 
 /**
  * POST /api/query
- * Hỏi đáp thông minh bằng tiếng Việt về dữ liệu crawl
- *
- * Body: { "question": "Đối thủ nào đang có content về vàng hiệu quả?" }
+ * Intelligent Vietnamese Q&A for crawled data.
+ * Returns plain JSON: { answer, confidence, suggestedActions, data, _meta }
  */
 export async function POST(request: Request) {
   let body: NLQueryRequest;
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Request body phải là JSON hợp lệ." }, { status: 400 });
+    return new Response(JSON.stringify({ error: "Request body phải là JSON hợp lệ." }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
-  if (!body.question?.trim()) {
-    return NextResponse.json({ error: "Vui lòng nhập câu hỏi." }, { status: 400 });
+  const question = body.question?.trim();
+  if (!question) {
+    return new Response(JSON.stringify({ error: "Vui lòng nhập câu hỏi." }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
-  if (body.question.length > 500) {
-    return NextResponse.json({ error: "Câu hỏi quá dài. Tối đa 500 ký tự." }, { status: 400 });
+  if (question.length > 500) {
+    return new Response(JSON.stringify({ error: "Câu hỏi quá dài. Tối đa 500 ký tự." }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   try {
-    const result = await answerQuestion(body.question.trim());
-    return NextResponse.json(result);
-  } catch (error) {
-    console.error("[nlquery] Error:", error);
-    return NextResponse.json(
+    const result = await answerQuestion(question);
+
+    return new Response(
+      JSON.stringify({
+        answer: result.answer,
+        confidence: result.confidence,
+        suggestedActions: result.suggestedActions ?? [],
+        data: result.data,
+        _meta: (result as any)._meta,
+      }),
       {
-        answer: "❌ Lỗi xử lý: " + (error instanceof Error ? error.message : "Unknown"),
-        confidence: "low" as const,
-      },
-      { status: 500 }
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  } catch (error: any) {
+    console.error("[api/query] Error:", error);
+    return new Response(
+      JSON.stringify({
+        error: "Lỗi xử lý câu hỏi.",
+        answer: "❌ Đã xảy ra lỗi khi xử lý câu hỏi. Vui lòng thử lại.",
+        confidence: "low",
+        suggestedActions: [],
+      }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }
     );
   }
 }
+

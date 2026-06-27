@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 import {
   Award,
   ExternalLink,
@@ -137,16 +137,17 @@ export function RecommendationPanel() {
   const [report, setReport] = useState<RecommendationReport | null>(null);
   const [isPending, startTransition] = useTransition();
   const [days, setDays] = useState(30);
+  // Track whether user has ever triggered an analysis
+  const [hasRun, setHasRun] = useState(false);
 
   const fetchRecs = () => {
+    setHasRun(true);
     startTransition(async () => {
       const response = await fetch(`/api/recommendations?days=${days}`);
       const data = await response.json();
       setReport(data);
     });
   };
-
-  useEffect(() => { fetchRecs(); }, [days]);
 
   const highCount = report?.recommendations.filter((r) => r.priority === "high").length ?? 0;
   const mediumCount = report?.recommendations.filter((r) => r.priority === "medium").length ?? 0;
@@ -196,12 +197,13 @@ export function RecommendationPanel() {
       {/* AI Progress */}
       {isPending ? (
         <LoadingProgress />
-      ) : !report ? (
-        <div className="rounded border border-kolia-line bg-white p-12 text-center shadow-sm">
-          <Lightbulb className="mx-auto h-12 w-12 text-slate-300" />
-          <p className="mt-4 text-lg font-semibold text-slate-500">Nhấn "Phân tích" để nhận đề xuất</p>
+      ) : !hasRun ? (
+        <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-kolia-line bg-slate-50 py-20 text-center">
+          <Lightbulb className="mb-4 h-12 w-12 text-slate-300" />
+          <p className="font-semibold text-slate-500">Chọn khoảng thời gian và nhấn <span className="text-kolia-green">Phân tích</span></p>
+          <p className="mt-1 text-sm text-slate-400">AI sẽ phân tích dữ liệu đối thủ và đề xuất chiến lược nội dung phù hợp.</p>
         </div>
-      ) : (
+      ) : !report ? null : (
         <div className="space-y-3">
           {report.recommendations.map((rec) => {
             const cfg = typeConfig[rec.type] ?? typeConfig.experiment;

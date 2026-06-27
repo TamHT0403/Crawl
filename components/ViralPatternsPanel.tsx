@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 import { BrainCircuit, Database, Loader2, Sparkles, TrendingUp, Target, BarChart3, Layers } from "lucide-react";
 import type { ViralPattern, ViralCluster, EmergingTrend } from "@/lib/viralPatterns";
 
@@ -95,16 +95,17 @@ export function ViralPatternsPanel() {
   const [data, setData] = useState<{ patterns: ViralPattern[]; clusters: ViralCluster[]; emergingTrends: EmergingTrend[] } | null>(null);
   const [isPending, startTransition] = useTransition();
   const [days, setDays] = useState(90);
+  // Track whether user has ever run an analysis
+  const [hasRun, setHasRun] = useState(false);
 
   const fetchData = () => {
+    setHasRun(true);
     startTransition(async () => {
       const res = await fetch(`/api/viral-patterns?days=${days}`);
       const d = await res.json();
       setData(d);
     });
   };
-
-  useEffect(() => { fetchData(); }, [days]);
 
   const typeIcons: Record<string, typeof TrendingUp> = { hook: Target, format: Layers, topic: TrendingUp, structure: BarChart3, timing: BarChart3 };
 
@@ -123,6 +124,12 @@ export function ViralPatternsPanel() {
 
       {isPending ? (
         <ViralLoadingProgress />
+      ) : !hasRun ? (
+        <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-kolia-line bg-slate-50 py-20 text-center">
+          <BrainCircuit className="mb-4 h-12 w-12 text-slate-300" />
+          <p className="font-semibold text-slate-500">Chọn khoảng thời gian và nhấn <span className="text-kolia-green">Phân tích</span></p>
+          <p className="mt-1 text-sm text-slate-400">AI sẽ quét dữ liệu và phát hiện các pattern viral đang hoạt động.</p>
+        </div>
       ) : !data ? null : (
         <>
           {/* Viral Patterns */}
