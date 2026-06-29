@@ -64,9 +64,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=10000
 ENV HOSTNAME=0.0.0.0
 
-# Create nextjs user for security
+# Create nextjs user for security with a writable home directory
 RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 nextjs
+    adduser --system --uid 1001 --home /home/nextjs nextjs
 
 # Copy built assets
 # (Commented out because public folder does not exist in this project)
@@ -76,6 +76,9 @@ COPY --from=builder /app/.next/static ./.next/static
 
 # Copy Prisma schema + migrations for runtime/deployment migrations
 COPY --from=builder /app/prisma ./prisma
+
+# Copy node_modules for prisma CLI (needed by pre-deploy migrate command)
+COPY --from=builder /app/node_modules ./node_modules
 
 USER nextjs
 EXPOSE 10000
