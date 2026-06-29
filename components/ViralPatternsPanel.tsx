@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { BrainCircuit, Database, Loader2, Sparkles, TrendingUp, Target, BarChart3, Layers } from "lucide-react";
 import type { ViralPattern, ViralCluster, EmergingTrend } from "@/lib/viralPatterns";
 
