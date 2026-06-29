@@ -466,13 +466,13 @@ export function AlertPanel() {
               📦 Xem payload webhook mẫu
             </summary>
             <pre className="mt-2 rounded-lg bg-slate-50 p-3 text-xs leading-5">
-{`{
-  "event": "sync.completed",
-  "title": "✅ Đồng bộ hoàn tất",
-  "message": "📊 Kết quả đồng bộ...",
-  "metadata": { "createdPosts": 12 },
-  "timestamp": "2026-06-16T..."
-}`}
+            {`{
+              "event": "sync.completed",
+              "title": "✅ Đồng bộ hoàn tất",
+              "message": "📊 Kết quả đồng bộ...",
+              "metadata": { "createdPosts": 12 },
+              "timestamp": "${new Date().toISOString()}"
+            }`}
             </pre>
           </details>
         </div>

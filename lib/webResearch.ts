@@ -319,12 +319,13 @@ export async function enrichWithWebResearch(
 function buildSearchQuery(topic: string, niche: string): string {
   // Bỏ query quá dài
   const cleanTopic = topic.slice(0, 80);
+  const currentYear = new Date().getFullYear();
 
   // Nếu niche là tài chính, thêm context phù hợp
   if (niche.toLowerCase().includes("tài chính") || niche.toLowerCase().includes("đầu tư")) {
-    return `${cleanTopic} phân tích tài chính 2025`;
+    return `${cleanTopic} phân tích tài chính ${currentYear}`;
   }
-  return `${cleanTopic} ${niche} 2025`;
+  return `${cleanTopic} ${niche} ${currentYear}`;
 }
 
 /**
