@@ -87,7 +87,8 @@ export class SocialCrawlerTikTokProvider {
       log(`❌ Social Crawler TikTok: API URL không hợp lệ (${config.apiUrl})`);
       return [];
     }
-    const endpoint = `${apiUrl}/crawl/tiktok`;
+    const endpoint = `${apiUrl}/api/crawl/tiktok`;
+    log(`🌐 Social Crawler TikTok: endpoint=${endpoint}`);
 
     log(`🌐 Social Crawler TikTok: url=${channelUrl}, maxItems=${maxItems}`);
 

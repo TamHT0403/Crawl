@@ -94,7 +94,7 @@ export class SocialCrawlerFacebookProvider {
       log(`❌ Social Crawler Facebook: API URL không hợp lệ (${config.apiUrl})`);
       return [];
     }
-    const endpoint = `${apiUrl}/crawl/facebook`;
+    const endpoint = `${apiUrl}/api/crawl/facebook`;
 
     log(`🌐 Social Crawler Facebook: url=${targetUrl}, maxItems=${maxItems}`);
 

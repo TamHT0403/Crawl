@@ -150,7 +150,11 @@ export class FacebookAdapter implements CompetitorDataAdapter {
       const defaultAccount = await getDefaultFacebookAccount();
       const cookies = defaultAccount?.sessionData ? JSON.parse(defaultAccount.sessionData) : null;
 
-      const maxItems = scConfig.maxItems ?? 50;
+      const contextAny = context as Record<string, unknown>;
+      const maxItems =
+        typeof contextAny.facebookMaxPosts === "number"
+          ? contextAny.facebookMaxPosts
+          : scConfig.facebookMaxPosts ?? scConfig.maxItems ?? 50;
 
       context.onLog?.(
         `🌐 ${competitor.name}: Crawl via Social Crawler (maxItems=${maxItems})`
