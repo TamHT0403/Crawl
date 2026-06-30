@@ -106,8 +106,6 @@ export class SocialCrawlerFacebookProvider {
     };
 
     if (options.cookies) body.cookies = options.cookies;
-    if (options.startDate) body.start_date = new Date(options.startDate).toISOString();
-    if (options.endDate) body.end_date = new Date(options.endDate).toISOString();
     if (options.stopUrls && options.stopUrls.length > 0) body.stop_urls = options.stopUrls;
 
     // ── Scroll / Anti-ban config ────────────────────────────────────

@@ -50,6 +50,50 @@ function formatTime(ms: number): string {
   return `${min}m${sec % 60}s`;
 }
 
+const syncFilterTimeZone = "Asia/Ho_Chi_Minh";
+const syncFilterDateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: syncFilterTimeZone,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function toSyncFilterDateKey(value: Date | string): string {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+
+  const date = value instanceof Date ? value : new Date(value);
+  const parts = syncFilterDateFormatter.formatToParts(date);
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  const day = parts.find((part) => part.type === "day")?.value;
+  return `${year}-${month}-${day}`;
+}
+
+function isOutsideSyncDateRange(postDate: Date, startDate?: string, endDate?: string): boolean {
+  if (!startDate && !endDate) return false;
+
+  const postDateKey = toSyncFilterDateKey(postDate);
+  if (startDate && postDateKey < toSyncFilterDateKey(startDate)) return true;
+  if (endDate && postDateKey > toSyncFilterDateKey(endDate)) return true;
+  return false;
+}
+
+function formatSyncDateRangeLog(startDate?: string, endDate?: string): string {
+  const start = startDate ? toSyncFilterDateKey(startDate) : "...";
+  const end = endDate ? toSyncFilterDateKey(endDate) : "...";
+  return `🗓️ Áp dụng bộ lọc ngày (${syncFilterTimeZone}): ${start} → ${end}`;
+}
+
+function getFacebookSaveLimit(platform: string, syncFilters?: SyncFilters): number | null {
+  if (platform !== "facebook") return null;
+  if (typeof syncFilters?.facebookMaxPosts !== "number") return null;
+  return syncFilters.facebookMaxPosts;
+}
+
+function shouldApplySyncDateFilter(platform: string, settings: Awaited<ReturnType<typeof getPublicSettings>>): boolean {
+  return !(platform === "facebook" && settings.facebookProvider?.activeProvider === "social-crawler");
+}
+
 export async function syncCompetitorData(platform?: Platform, syncFilters?: SyncFilters) {
   const settings = await getPublicSettings();
   const platforms = syncFilters?.platforms?.length ? syncFilters.platforms : (platform ? [platform] : undefined);
@@ -86,16 +130,7 @@ export async function syncCompetitorData(platform?: Platform, syncFilters?: Sync
         competitorId: competitor.id
       });
 
-      // Skip posts outside the requested date range
-      if (syncFilters?.startDate || syncFilters?.endDate) {
-        const postDate = new Date(enriched.publishedAt);
-        if (syncFilters.startDate && postDate < new Date(syncFilters.startDate)) continue;
-        if (syncFilters.endDate) {
-          const endDate = new Date(syncFilters.endDate);
-          endDate.setHours(23, 59, 59, 999);
-          if (postDate > endDate) continue;
-        }
-      }
+      // Skip posts check removed because date filtering is already handled on the crawler backend
 
       const existingPost = await prisma.post.findFirst({
         where: {
@@ -229,6 +264,9 @@ export async function syncCompetitorDataStream(
             : undefined;
 
         send("log", { message: `✅ Đã tải cấu hình — ${platforms?.join(", ") || "tất cả nền tảng"}` });
+        if (syncFilters?.startDate || syncFilters?.endDate) {
+          send("log", { message: formatSyncDateRangeLog(syncFilters.startDate, syncFilters.endDate) });
+        }
         send("log", { message: "🔍 Đang truy vấn danh sách đối thủ..." });
 
         const whereCompetitor: Record<string, unknown> = {};
@@ -303,18 +341,28 @@ export async function syncCompetitorDataStream(
 
           let competitorCreated = 0;
           let competitorUpdated = 0;
+          let competitorSkippedByDate = 0;
+          const competitorSaveLimit = getFacebookSaveLimit(competitor.platform, syncFilters);
+          const applyDateFilter = shouldApplySyncDateFilter(competitor.platform, settings);
+          if (!applyDateFilter && (syncFilters?.startDate || syncFilters?.endDate)) {
+            send("log", { message: `ℹ️ ${competitor.name}: Bỏ qua lọc ngày tại Next.js vì Social Crawler Facebook đã trả danh sách cuối cùng.`, competitor: competitor.name });
+          }
 
           for (let j = 0; j < (rawPosts?.length ?? 0); j++) {
+            if (competitorSaveLimit !== null && competitorCreated + competitorUpdated >= competitorSaveLimit) break;
+
             const rawPost = rawPosts![j];
             const enriched = enrichRawPost({ ...rawPost, competitorId: competitor.id });
 
-            if (syncFilters?.startDate || syncFilters?.endDate) {
+            if (applyDateFilter && (syncFilters?.startDate || syncFilters?.endDate)) {
               const postDate = new Date(enriched.publishedAt);
-              if (syncFilters.startDate && postDate < new Date(syncFilters.startDate)) continue;
-              if (syncFilters.endDate) {
-                const endDate = new Date(syncFilters.endDate);
-                endDate.setHours(23, 59, 59, 999);
-                if (postDate > endDate) continue;
+              if (isOutsideSyncDateRange(postDate, syncFilters.startDate, syncFilters.endDate)) {
+                competitorSkippedByDate++;
+                send("log", {
+                  message: `⏭️ ${competitor.name}: Bỏ qua bài ngoài khoảng thời gian (${toSyncFilterDateKey(postDate)}) — ${enriched.postUrl}`,
+                  competitor: competitor.name,
+                });
+                continue;
               }
             }
 
@@ -360,6 +408,9 @@ export async function syncCompetitorDataStream(
           const percent = Math.round((completedCompetitors / totalCompetitors) * 100);
           send("progress", { total: totalCompetitors, completed: completedCompetitors, percent });
           send("log", { message: `✅ ${competitor.name}: Hoàn tất — ${competitorCreated} bài mới, ${competitorUpdated} bài cập nhật.`, competitor: competitor.name });
+          if (competitorSkippedByDate > 0) {
+            send("log", { message: `ℹ️ ${competitor.name}: ${competitorSkippedByDate} bài bị bỏ qua do nằm ngoài khoảng thời gian lọc.`, competitor: competitor.name });
+          }
           updateProgress();
         }
 
@@ -447,6 +498,9 @@ export function startBackgroundSync(
           : undefined;
 
       send("log", { message: `✅ Đã tải cấu hình — ${platforms?.join(", ") || "tất cả nền tảng"}` });
+      if (syncFilters?.startDate || syncFilters?.endDate) {
+        send("log", { message: formatSyncDateRangeLog(syncFilters.startDate, syncFilters.endDate) });
+      }
       send("log", { message: "🔍 Đang truy vấn danh sách đối thủ..." });
 
       const whereCompetitor: Record<string, unknown> = {};
@@ -518,17 +572,25 @@ export function startBackgroundSync(
             send("log", { message: `📥 ${competitor.name}: Đã thu thập ${rawPosts.length} bài viết, đang lưu...` });
           }
 
-          let compCreated = 0, compUpdated = 0;
+          let compCreated = 0, compUpdated = 0, compSkippedByDate = 0;
+          const compSaveLimit = getFacebookSaveLimit(competitor.platform, syncFilters);
+          const applyDateFilter = shouldApplySyncDateFilter(competitor.platform, settings);
+          if (!applyDateFilter && (syncFilters?.startDate || syncFilters?.endDate)) {
+            send("log", { message: `ℹ️ ${competitor.name}: Bỏ qua lọc ngày tại Next.js vì Social Crawler Facebook đã trả danh sách cuối cùng.` });
+          }
           for (const rawPost of (rawPosts || [])) {
+            if (compSaveLimit !== null && compCreated + compUpdated >= compSaveLimit) break;
+
             const enriched = enrichRawPost({ ...rawPost, competitorId: competitor.id });
 
-            if (syncFilters?.startDate || syncFilters?.endDate) {
+            if (applyDateFilter && (syncFilters?.startDate || syncFilters?.endDate)) {
               const postDate = new Date(enriched.publishedAt);
-              if (syncFilters.startDate && postDate < new Date(syncFilters.startDate)) continue;
-              if (syncFilters.endDate) {
-                const endDate = new Date(syncFilters.endDate);
-                endDate.setHours(23, 59, 59, 999);
-                if (postDate > endDate) continue;
+              if (isOutsideSyncDateRange(postDate, syncFilters.startDate, syncFilters.endDate)) {
+                compSkippedByDate++;
+                send("log", {
+                  message: `⏭️ ${competitor.name}: Bỏ qua bài ngoài khoảng thời gian (${toSyncFilterDateKey(postDate)}) — ${enriched.postUrl}`,
+                });
+                continue;
               }
             }
 
@@ -565,6 +627,9 @@ export function startBackgroundSync(
 
           send("progress", { platform: plat, completed: i + 1, percent: Math.round(((i + 1) / comps.length) * 100), phase: i + 1 === comps.length ? "done" : "running", statusMsg: `✅ ${competitor.name}: Hoàn tất (${compCreated} mới, ${compUpdated} cập nhật)` });
           send("log", { message: `✅ ${competitor.name}: Hoàn tất — ${compCreated} bài mới, ${compUpdated} bài cập nhật.` });
+          if (compSkippedByDate > 0) {
+            send("log", { message: `ℹ️ ${competitor.name}: ${compSkippedByDate} bài bị bỏ qua do nằm ngoài khoảng thời gian lọc.` });
+          }
         }
       }));
 

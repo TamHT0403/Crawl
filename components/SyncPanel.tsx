@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown, ChevronRight, Database, Loader2, X } from "lucide-react";
 import { DateRangePicker } from "rsuite";
-import { subDays, startOfDay, endOfDay } from "date-fns";
+import { format, subDays, startOfDay, endOfDay } from "date-fns";
 import { cn } from "@/lib/utils";
 import type { Platform } from "@/lib/types";
 
@@ -39,10 +39,27 @@ const platformOptions: { value: Platform; label: string; color: string }[] = [
   { value: "facebook", label: "Facebook", color: "bg-blue-50 text-blue-700 ring-blue-100" }
 ];
 
+const vietnamDateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function getVietnamToday() {
+  const parts = vietnamDateFormatter.formatToParts(new Date());
+  const year = Number(parts.find((part) => part.type === "year")?.value);
+  const month = Number(parts.find((part) => part.type === "month")?.value);
+  const day = Number(parts.find((part) => part.type === "day")?.value);
+  return startOfDay(new Date(year, month - 1, day));
+}
+
+const vietnamToday = getVietnamToday();
+
 const predefinedRanges = [
-  { label: "Hôm nay", value: [startOfDay(new Date()), endOfDay(new Date())] as [Date, Date] },
-  { label: "7 ngày qua", value: [startOfDay(subDays(new Date(), 6)), endOfDay(new Date())] as [Date, Date] },
-  { label: "30 ngày qua", value: [startOfDay(subDays(new Date(), 29)), endOfDay(new Date())] as [Date, Date] }
+  { label: "Hôm nay", value: [vietnamToday, endOfDay(vietnamToday)] as [Date, Date] },
+  { label: "7 ngày qua", value: [startOfDay(subDays(vietnamToday, 6)), endOfDay(vietnamToday)] as [Date, Date] },
+  { label: "30 ngày qua", value: [startOfDay(subDays(vietnamToday, 29)), endOfDay(vietnamToday)] as [Date, Date] }
 ];
 
 export function SyncPanel({ open, onClose }: SyncPanelProps) {
@@ -230,6 +247,8 @@ export function SyncPanel({ open, onClose }: SyncPanelProps) {
     setLogs((prev) => [...prev, { id: Date.now() + Math.random(), message, time }]);
   };
 
+  const formatFilterDate = (date: Date) => format(date, "yyyy-MM-dd");
+
   // ─── Handle Sync (background job) ───────────────────────────────
   // ─── Handle Sync (background job + poll status) ─────────────────
   const handleSync = useCallback(() => {
@@ -246,8 +265,8 @@ export function SyncPanel({ open, onClose }: SyncPanelProps) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             platforms: selectedPlatforms,
-            startDate: dateRange?.[0]?.toISOString(),
-            endDate: dateRange?.[1]?.toISOString(),
+            startDate: dateRange?.[0] ? formatFilterDate(dateRange[0]) : undefined,
+            endDate: dateRange?.[1] ? formatFilterDate(dateRange[1]) : undefined,
             competitorIds: selectedCompetitorIds,
             facebookMaxPosts,
           }),
