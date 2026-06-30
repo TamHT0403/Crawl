@@ -103,7 +103,10 @@ export class SocialCrawlerTikTokProvider {
     // Build request body theo đúng format của social-crawler service
     const body: Record<string, unknown> = {
       target: channelUrl,
+      targets: [channelUrl],
       period,
+      max_items: maxItems,
+      maxItems,
     };
 
     if (options.cookies) body.cookies = options.cookies;

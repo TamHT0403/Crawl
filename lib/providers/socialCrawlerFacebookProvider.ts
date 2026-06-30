@@ -232,11 +232,9 @@ export class SocialCrawlerFacebookProvider {
               : "text_post",
       }));
 
-      // Date filter (client-side) đề phòng service không filter đúng
-      const filtered = filterByDateRange(posts, options.startDate, options.endDate);
-      log(`✅ Social Crawler Facebook: ${filtered.length}/${posts.length} posts sau khi lọc ngày`);
+      log(`✅ Social Crawler Facebook: Trả về toàn bộ ${posts.length} posts đã lọc từ BE`);
 
-      return filtered;
+      return posts;
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       if ((error as Error).name === "AbortError") {

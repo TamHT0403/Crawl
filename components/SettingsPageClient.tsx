@@ -528,6 +528,7 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
   const [platform, setPlatform] = useState<"tiktok" | "facebook" | "youtube">("tiktok");
   const [providers, setProviders] = useState<any>(null);
   const [configItems, setConfigItems] = useState<any[]>([]);
+  const [socialCrawlerSecretDraft, setSocialCrawlerSecretDraft] = useState({ apiUrl: "", apiKey: "" });
   const [youtubeStatus, setYoutubeStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [pending, startTransition] = useTransition();
@@ -553,59 +554,77 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
   const cfg: any = providers?.[platform === "youtube" ? "tiktok" : platform];
 
   const update = (partial: any) => {
-    if (!providers) return;
     const key = platform === "youtube" ? "tiktok" : platform;
-    setProviders({ ...providers, [key]: { ...providers[key], ...partial } });
+    setProviders((prev: any) => prev ? { ...prev, [key]: { ...prev[key], ...partial } } : prev);
+  };
+
+  const updateSocialCrawlerSecretDraft = (partial: Partial<typeof socialCrawlerSecretDraft>) => {
+    setSocialCrawlerSecretDraft(prev => ({ ...prev, ...partial }));
+  };
+
+  const ensureSaveOk = async (res: Response) => {
+    if (res.ok) return;
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.error || `Lỗi lưu cấu hình (${res.status})`);
   };
 
   const save = async () => {
     if (!cfg || platform === "youtube") return;
     startTransition(async () => {
-      // Lưu cấu hình provider (activeProvider, playwright, apify) qua API cũ
-      await fetch("/api/settings/providers", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          platform,
-          activeProvider: cfg.activeProvider,
-          playwright: cfg.playwright,
-          apify: cfg.apify,
-          // Không gửi socialCrawler.apiUrl + apiKey — chúng được lưu riêng qua config API (mã hoá)
-          socialCrawler: {
-            ...cfg.socialCrawler,
-            apiUrl: undefined,
-            apiKey: undefined,
-          },
-        }),
-      });
+      try {
+        // Lưu cấu hình provider (activeProvider, playwright, apify) qua API cũ
+        await ensureSaveOk(await fetch("/api/settings/providers", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            platform,
+            activeProvider: cfg.activeProvider,
+            playwright: cfg.playwright,
+            apify: cfg.apify,
+            // Không gửi socialCrawler.apiUrl + apiKey — chúng được lưu riêng qua config API (mã hoá)
+            socialCrawler: {
+              ...cfg.socialCrawler,
+              apiUrl: undefined,
+              apiKey: undefined,
+            },
+          }),
+        }));
 
-      // Lưu Social Crawler API URL + Key qua config API (mã hoá AES-256-GCM)
-      const scApiUrl = scConfigVal("social_crawler_api_url");
-      const scApiKey = scConfigVal("social_crawler_api_key");
-      const promises: Promise<any>[] = [];
-      const apiUrl = realSecretValue(cfg.socialCrawler.apiUrl).trim();
-      const apiKey = realSecretValue(cfg.socialCrawler.apiKey).trim();
-      if (apiUrl && apiUrl !== scApiUrl?.value) {
-        promises.push(
-          fetch("/api/config", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "save", key: "social_crawler_api_url", value: apiUrl }),
-          })
-        );
-      }
-      if (apiKey && apiKey !== scApiKey?.value) {
-        promises.push(
-          fetch("/api/config", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "save", key: "social_crawler_api_key", value: apiKey }),
-          })
-        );
-      }
-      await Promise.all(promises);
+        // Lưu Social Crawler API URL + Key qua config API (mã hoá AES-256-GCM)
+        const scApiUrl = scConfigVal("social_crawler_api_url");
+        const scApiKey = scConfigVal("social_crawler_api_key");
+        const promises: Promise<any>[] = [];
+        const apiUrl = realSecretValue(socialCrawlerSecretDraft.apiUrl).trim();
+        const apiKey = realSecretValue(socialCrawlerSecretDraft.apiKey).trim();
+        if (apiUrl && apiUrl !== scApiUrl?.value) {
+          promises.push(
+            fetch("/api/config", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "save", key: "social_crawler_api_url", value: apiUrl }),
+            }).then(ensureSaveOk)
+          );
+        }
+        if (apiKey && apiKey !== scApiKey?.value) {
+          promises.push(
+            fetch("/api/config", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "save", key: "social_crawler_api_key", value: apiKey }),
+            }).then(ensureSaveOk)
+          );
+        }
+        await Promise.all(promises);
+        if (promises.length > 0) {
+          const d = await fetch("/api/config").then(r => r.json());
+          setConfigItems(d.configs ?? []);
+          setSocialCrawlerSecretDraft({ apiUrl: "", apiKey: "" });
+        }
 
-      onMsg({ type: "success", text: `✅ Đã lưu ${platform}` });
+        onMsg({ type: "success", text: `✅ Đã lưu ${platform}` });
+      } catch (err) {
+        onMsg({ type: "error", text: err instanceof Error ? err.message : "Không lưu được cấu hình" });
+      }
     });
   };
 
@@ -779,8 +798,8 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
                   Địa chỉ của Social Crawler service. Mặc định là server TMTCO.<br />
                   Chỉ thay đổi nếu bạn tự host service riêng.
                 </p>
-                <input type="password" value={realSecretValue(cfg.socialCrawler.apiUrl)}
-                  onChange={(e) => update({ socialCrawler: { ...cfg.socialCrawler, apiUrl: e.target.value } })}
+                <input type="password" value={socialCrawlerSecretDraft.apiUrl}
+                  onChange={(e) => updateSocialCrawlerSecretDraft({ apiUrl: e.target.value })}
                   placeholder={scConfigVal("social_crawler_api_url")?.hasValue ? "••••••••••••" : "https://social-crawler.public.rke.crawl.tmtco.org"}
                   className={cn(inp, "font-mono")} />
               </label>
@@ -789,8 +808,8 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
                 <p className="text-[10px] text-slate-400 leading-relaxed">
                   API Key để xác thực với Social Crawler service. Liên hệ admin để lấy key.
                 </p>
-                <input type="password" value={realSecretValue(cfg.socialCrawler.apiKey)}
-                  onChange={(e) => update({ socialCrawler: { ...cfg.socialCrawler, apiKey: e.target.value } })}
+                <input type="password" value={socialCrawlerSecretDraft.apiKey}
+                  onChange={(e) => updateSocialCrawlerSecretDraft({ apiKey: e.target.value })}
                   placeholder={scConfigVal("social_crawler_api_key")?.hasValue ? "••••••••" : "Nhập key..."}
                   className={cn(inp, "font-mono")} />
               </label>
