@@ -4,7 +4,7 @@
  * Sử dụng third-party service social-crawler để crawl TikTok videos/profiles.
  * Endpoint: https://social-crawler.public.rke.crawl.tmtco.org
  *
- * API: POST /crawl
+ * API: POST /crawl/tiktok
  * Body: { target: string, period?: string, cookies?: any, start_date?: string, end_date?: string }
  * Response: SSE stream với các event: log, progress, done, error
  *
@@ -12,7 +12,7 @@
  * không cần browser local, không lo bị block IP.
  */
 
-import type { SocialCrawlerProviderConfig } from "@/lib/types";
+import { DEFAULT_SOCIAL_CRAWLER_CONFIG, type SocialCrawlerProviderConfig } from "@/lib/types";
 import type { RawPostInput } from "@/lib/types";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -42,6 +42,21 @@ interface TikTokVideo {
   stats?: TikTokVideoStats;
 }
 
+function normalizeApiUrl(apiUrl: string): string | null {
+  const value = apiUrl.trim();
+  if (!value || value.includes("•••")) {
+    return DEFAULT_SOCIAL_CRAWLER_CONFIG.apiUrl;
+  }
+
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return value.replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
 // ─── Provider ──────────────────────────────────────────────────────────────
 
 export class SocialCrawlerTikTokProvider {
@@ -67,8 +82,12 @@ export class SocialCrawlerTikTokProvider {
     const log = options.onLog ?? ((msg: string) => console.log(`[social-crawler-tiktok] ${msg}`));
     const maxItems = options.maxItems ?? config.maxItems ?? 50;
 
-    const apiUrl = config.apiUrl.replace(/\/+$/, "");
-    const endpoint = `${apiUrl}/crawl`;
+    const apiUrl = normalizeApiUrl(config.apiUrl);
+    if (!apiUrl) {
+      log(`❌ Social Crawler TikTok: API URL không hợp lệ (${config.apiUrl})`);
+      return [];
+    }
+    const endpoint = `${apiUrl}/crawl/tiktok`;
 
     log(`🌐 Social Crawler TikTok: url=${channelUrl}, maxItems=${maxItems}`);
 

@@ -18,6 +18,9 @@ import {
   DEFAULT_SOCIAL_CRAWLER_CONFIG,
 } from "@/lib/types";
 
+const isMaskedConfigValue = (value: string | undefined): value is string =>
+  typeof value === "string" && value.includes("•••");
+
 // ─── Legacy Setting keys (giữ cho backward compat) ─────────────────────────
 const settingKeys = [
   "youtubeApiKey",
@@ -128,6 +131,13 @@ export async function getPlatformProviderConfig(
     }
   } catch { /* fallback to default */ }
 
+  if (isMaskedConfigValue(socialCrawler.apiUrl)) {
+    socialCrawler.apiUrl = DEFAULT_SOCIAL_CRAWLER_CONFIG.apiUrl;
+  }
+  if (isMaskedConfigValue(socialCrawler.apiKey)) {
+    socialCrawler.apiKey = DEFAULT_SOCIAL_CRAWLER_CONFIG.apiKey;
+  }
+
   return {
     activeProvider: (row.activeProvider as CrawlProvider) ?? "playwright",
     playwright,
@@ -225,19 +235,28 @@ export async function getPublicSettings(): Promise<PublicSettings> {
   const fbPassword = settings.get("facebookPassword")?.trim() || (await getConfig("fb_password")) || "";
 
   // ─── Social Crawler: load từ encrypted Setting table ────────
-  const scApiUrl = await getConfig("social_crawler_api_url");
-  const scApiKey = await getConfig("social_crawler_api_key");
+  const scApiUrlRaw = await getConfig("social_crawler_api_url");
+  const scApiKeyRaw = await getConfig("social_crawler_api_key");
+  const scApiUrl = isMaskedConfigValue(scApiUrlRaw) ? undefined : scApiUrlRaw;
+  const scApiKey = isMaskedConfigValue(scApiKeyRaw) ? undefined : scApiKeyRaw;
   const scMaxItems = await getConfig("social_crawler_max_items");
   const scTimeoutSecs = await getConfig("social_crawler_timeout_secs");
 
-  // Merge encrypted values into tiktokProvider.socialCrawler (override PlatformProviderConfig)
+  // Merge encrypted values into provider socialCrawler config (override PlatformProviderConfig)
   if (scApiUrl || scApiKey) {
-    tiktokProvider.socialCrawler = {
-      ...tiktokProvider.socialCrawler,
+    const socialCrawlerOverride = {
       ...(scApiUrl ? { apiUrl: scApiUrl } : {}),
       ...(scApiKey ? { apiKey: scApiKey } : {}),
       ...(scMaxItems ? { maxItems: parseInt(scMaxItems, 10) } : {}),
       ...(scTimeoutSecs ? { timeoutSecs: parseInt(scTimeoutSecs, 10) } : {}),
+    };
+    tiktokProvider.socialCrawler = {
+      ...tiktokProvider.socialCrawler,
+      ...socialCrawlerOverride,
+    };
+    facebookProvider.socialCrawler = {
+      ...facebookProvider.socialCrawler,
+      ...socialCrawlerOverride,
     };
   }
 

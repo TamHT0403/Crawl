@@ -26,6 +26,10 @@ function maskSecret(val: string): string {
   }
 }
 
+function isMaskedSecretValue(value: string): boolean {
+  return value.includes("•••");
+}
+
 export async function GET() {
   const configs = await getAllConfigs();
   const registry = CONFIG_REGISTRY;
@@ -83,6 +87,9 @@ export async function POST(request: Request) {
     if (action === "save") {
       if (body.value === undefined) {
         return NextResponse.json({ error: "value là bắt buộc." }, { status: 400 });
+      }
+      if (meta.isSecret && isMaskedSecretValue(body.value)) {
+        return NextResponse.json({ error: "Không thể lưu giá trị đã bị che. Vui lòng nhập giá trị thật." }, { status: 400 });
       }
       await setConfig(key, body.value);
       return NextResponse.json({ ok: true, key, message: `✅ Đã lưu ${meta.label}` });

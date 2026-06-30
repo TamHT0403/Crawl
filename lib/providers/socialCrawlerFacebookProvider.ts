@@ -20,7 +20,7 @@
  * không cần browser local, không lo bị block IP.
  */
 
-import type { SocialCrawlerProviderConfig } from "@/lib/types";
+import { DEFAULT_SOCIAL_CRAWLER_CONFIG, type SocialCrawlerProviderConfig } from "@/lib/types";
 import type { RawPostInput } from "@/lib/types";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -46,6 +46,21 @@ interface FacebookDoneEvent {
   target?: string;
   count: number;
   videos: FacebookPost[];
+}
+
+function normalizeApiUrl(apiUrl: string): string | null {
+  const value = apiUrl.trim();
+  if (!value || value.includes("•••")) {
+    return DEFAULT_SOCIAL_CRAWLER_CONFIG.apiUrl;
+  }
+
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return value.replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
 }
 
 // ─── Provider ──────────────────────────────────────────────────────────────
@@ -74,7 +89,11 @@ export class SocialCrawlerFacebookProvider {
     const log = options.onLog ?? ((msg: string) => console.log(`[social-crawler-facebook] ${msg}`));
     const maxItems = options.maxItems ?? config.facebookMaxPosts ?? config.maxItems ?? 50;
 
-    const apiUrl = config.apiUrl.replace(/\/+$/, "");
+    const apiUrl = normalizeApiUrl(config.apiUrl);
+    if (!apiUrl) {
+      log(`❌ Social Crawler Facebook: API URL không hợp lệ (${config.apiUrl})`);
+      return [];
+    }
     const endpoint = `${apiUrl}/crawl/facebook`;
 
     log(`🌐 Social Crawler Facebook: url=${targetUrl}, maxItems=${maxItems}`);

@@ -47,6 +47,9 @@ const CONFIG_HELP: Record<string, { steps: string[]; url?: string; urlLabel?: st
 const MODEL_KEY_SUFFIX = "_model";
 const isModelKey = (key: string) => key.endsWith(MODEL_KEY_SUFFIX) && key !== "ai_provider";
 const providerFromModelKey = (key: string) => key.replace(MODEL_KEY_SUFFIX, "");
+const MASK_MARKER = "•••";
+const isMaskedValue = (value: unknown): value is string => typeof value === "string" && value.includes(MASK_MARKER);
+const realSecretValue = (value: unknown) => typeof value === "string" && !isMaskedValue(value) ? value : "";
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  MAIN
@@ -580,21 +583,23 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
       const scApiUrl = scConfigVal("social_crawler_api_url");
       const scApiKey = scConfigVal("social_crawler_api_key");
       const promises: Promise<any>[] = [];
-      if (cfg.socialCrawler.apiUrl !== scApiUrl?.value) {
+      const apiUrl = realSecretValue(cfg.socialCrawler.apiUrl).trim();
+      const apiKey = realSecretValue(cfg.socialCrawler.apiKey).trim();
+      if (apiUrl && apiUrl !== scApiUrl?.value) {
         promises.push(
           fetch("/api/config", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "save", key: "social_crawler_api_url", value: cfg.socialCrawler.apiUrl }),
+            body: JSON.stringify({ action: "save", key: "social_crawler_api_url", value: apiUrl }),
           })
         );
       }
-      if (cfg.socialCrawler.apiKey !== scApiKey?.value) {
+      if (apiKey && apiKey !== scApiKey?.value) {
         promises.push(
           fetch("/api/config", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "save", key: "social_crawler_api_key", value: cfg.socialCrawler.apiKey }),
+            body: JSON.stringify({ action: "save", key: "social_crawler_api_key", value: apiKey }),
           })
         );
       }
@@ -774,7 +779,7 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
                   Địa chỉ của Social Crawler service. Mặc định là server TMTCO.<br />
                   Chỉ thay đổi nếu bạn tự host service riêng.
                 </p>
-                <input type="password" value={cfg.socialCrawler.apiUrl}
+                <input type="password" value={realSecretValue(cfg.socialCrawler.apiUrl)}
                   onChange={(e) => update({ socialCrawler: { ...cfg.socialCrawler, apiUrl: e.target.value } })}
                   placeholder={scConfigVal("social_crawler_api_url")?.hasValue ? "••••••••••••" : "https://social-crawler.public.rke.crawl.tmtco.org"}
                   className={cn(inp, "font-mono")} />
@@ -784,7 +789,7 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
                 <p className="text-[10px] text-slate-400 leading-relaxed">
                   API Key để xác thực với Social Crawler service. Liên hệ admin để lấy key.
                 </p>
-                <input type="password" value={cfg.socialCrawler.apiKey}
+                <input type="password" value={realSecretValue(cfg.socialCrawler.apiKey)}
                   onChange={(e) => update({ socialCrawler: { ...cfg.socialCrawler, apiKey: e.target.value } })}
                   placeholder={scConfigVal("social_crawler_api_key")?.hasValue ? "••••••••" : "Nhập key..."}
                   className={cn(inp, "font-mono")} />
