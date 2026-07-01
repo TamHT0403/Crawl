@@ -42,6 +42,16 @@ interface TikTokVideo {
   stats?: TikTokVideoStats;
 }
 
+function redactRequestBody(body: Record<string, unknown>): Record<string, unknown> {
+  const redacted = { ...body };
+  if (Array.isArray(body.cookies)) {
+    redacted.cookies = `[redacted ${body.cookies.length} cookies]`;
+  } else if (body.cookies) {
+    redacted.cookies = "[redacted]";
+  }
+  return redacted;
+}
+
 function normalizeApiUrl(apiUrl: string): string | null {
   const value = apiUrl.trim();
   if (!value || value.includes("•••")) {
@@ -112,6 +122,20 @@ export class SocialCrawlerTikTokProvider {
     if (options.cookies) body.cookies = options.cookies;
     if (options.startDate) body.start_date = new Date(options.startDate).toISOString();
     if (options.endDate) body.end_date = new Date(options.endDate).toISOString();
+
+    const redactedBody = redactRequestBody(body);
+    log(`📤 Social Crawler TikTok request: POST ${endpoint}`, {
+      method: "POST",
+      endpoint,
+      headers: { "Content-Type": "application/json" },
+      body: redactedBody,
+    });
+    console.info("[social-crawler-tiktok] Request", {
+      method: "POST",
+      endpoint,
+      headers: { "Content-Type": "application/json" },
+      body: redactedBody,
+    });
 
     try {
       const controller = new AbortController();

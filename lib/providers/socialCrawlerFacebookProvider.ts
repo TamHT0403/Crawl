@@ -48,6 +48,16 @@ interface FacebookDoneEvent {
   videos: FacebookPost[];
 }
 
+function redactRequestBody(body: Record<string, unknown>): Record<string, unknown> {
+  const redacted = { ...body };
+  if (Array.isArray(body.cookies)) {
+    redacted.cookies = `[redacted ${body.cookies.length} cookies]`;
+  } else if (body.cookies) {
+    redacted.cookies = "[redacted]";
+  }
+  return redacted;
+}
+
 function normalizeApiUrl(apiUrl: string): string | null {
   const value = apiUrl.trim();
   if (!value || value.includes("•••")) {
@@ -105,6 +115,8 @@ export class SocialCrawlerFacebookProvider {
       facebookMaxPosts: maxItems,
     };
 
+    if (options.startDate) body.start_date = options.startDate;
+    if (options.endDate) body.end_date = options.endDate;
     if (options.cookies) body.cookies = options.cookies;
     if (options.stopUrls && options.stopUrls.length > 0) body.stop_urls = options.stopUrls;
 
@@ -128,6 +140,20 @@ export class SocialCrawlerFacebookProvider {
         body[apiKey] = val;
       }
     }
+
+    const redactedBody = redactRequestBody(body);
+    log(`📤 Social Crawler Facebook request: POST ${endpoint}`, {
+      method: "POST",
+      endpoint,
+      headers: { "Content-Type": "application/json" },
+      body: redactedBody,
+    });
+    console.info("[social-crawler-facebook] Request", {
+      method: "POST",
+      endpoint,
+      headers: { "Content-Type": "application/json" },
+      body: redactedBody,
+    });
 
     try {
       const controller = new AbortController();

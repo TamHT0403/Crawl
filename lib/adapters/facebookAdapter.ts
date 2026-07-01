@@ -164,6 +164,8 @@ export class FacebookAdapter implements CompetitorDataAdapter {
         competitor.channelUrl,
         scConfig,
         {
+          startDate: context.startDate,
+          endDate: context.endDate,
           maxItems,
           cookies,
           stopUrls: undefined, // Có thể thêm sau nếu cần truyền stopUrls từ context
