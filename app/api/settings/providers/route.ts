@@ -61,14 +61,31 @@ function maskProviderConfig(config: Record<string, unknown>): Record<string, unk
  * GET /api/settings/providers
  * Trả về provider config của tất cả platform (facebook, tiktok).
  */
-export async function GET() {
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const platform = url.searchParams.get("platform");
+
   const [facebook, tiktok] = await Promise.all([
     getPlatformProviderConfig("facebook"),
     getPlatformProviderConfig("tiktok"),
   ]);
+
+  const maskedFacebook = maskProviderConfig(facebook as unknown as Record<string, unknown>);
+  const maskedTiktok = maskProviderConfig(tiktok as unknown as Record<string, unknown>);
+
+  if (platform) {
+    if (platform === "facebook") {
+      return NextResponse.json({ facebook: maskedFacebook });
+    }
+    if (platform === "tiktok") {
+      return NextResponse.json({ tiktok: maskedTiktok });
+    }
+    return NextResponse.json({ error: "platform phải là 'facebook' hoặc 'tiktok'" }, { status: 400 });
+  }
+
   return NextResponse.json({
-    facebook: maskProviderConfig(facebook as unknown as Record<string, unknown>),
-    tiktok: maskProviderConfig(tiktok as unknown as Record<string, unknown>),
+    facebook: maskedFacebook,
+    tiktok: maskedTiktok,
   });
 }
 
@@ -120,7 +137,7 @@ export async function PUT(request: Request) {
       socialCrawler: cleanSocialCrawler,
     });
 
-    return NextResponse.json({ platform: body.platform, config: updated });
+    return NextResponse.json({ platform: body.platform, config: maskProviderConfig(updated as unknown as Record<string, unknown>) });
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: msg }, { status: 500 });

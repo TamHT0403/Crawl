@@ -30,11 +30,25 @@ function isMaskedSecretValue(value: string): boolean {
   return value.includes("•••");
 }
 
-export async function GET() {
-  const configs = await getAllConfigs();
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const keysParam = url.searchParams.get("keys");
+  const category = url.searchParams.get("category");
   const registry = CONFIG_REGISTRY;
 
-  const result = registry.map((meta) => {
+  const keys = keysParam
+    ? keysParam.split(",").map((k) => k.trim()).filter(Boolean)
+    : undefined;
+
+  const filteredRegistry = registry.filter((meta) => {
+    if (keys && !keys.includes(meta.key)) return false;
+    if (category && meta.category !== category) return false;
+    return true;
+  });
+
+  const configs = await getAllConfigs();
+
+  const result = filteredRegistry.map((meta) => {
     const entry = configs[meta.key];
     const displayValue = entry?.value
       ? meta.isSecret

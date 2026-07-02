@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { getConfig } from "@/lib/config";
+import { decrypt, encrypt } from "@/lib/crypto";
 import type {
   ApifyProviderConfig,
   CrawlProvider,
@@ -20,6 +21,56 @@ import {
 
 const isMaskedConfigValue = (value: string | undefined): value is string =>
   typeof value === "string" && value.includes("•••");
+
+const ENCRYPTED_STRING_REGEX = /^[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*$/;
+const isEncryptedString = (value: unknown): value is string =>
+  typeof value === "string" && ENCRYPTED_STRING_REGEX.test(value);
+
+function decryptSecretValue(value: unknown): string {
+  if (typeof value !== "string") return String(value ?? "");
+  if (!isEncryptedString(value)) return value;
+  try {
+    return decrypt(value);
+  } catch {
+    return value;
+  }
+}
+
+function encryptSecretValue(value: string): string {
+  if (!value) return value;
+  if (isEncryptedString(value)) return value;
+  return encrypt(value);
+}
+
+function decryptProviderSecrets(config: PlatformCrawlConfig): PlatformCrawlConfig {
+  return {
+    ...config,
+    apify: {
+      ...config.apify,
+      apiToken: decryptSecretValue(config.apify.apiToken),
+    },
+    socialCrawler: {
+      ...config.socialCrawler,
+      apiUrl: decryptSecretValue(config.socialCrawler.apiUrl),
+      apiKey: decryptSecretValue(config.socialCrawler.apiKey),
+    },
+  };
+}
+
+function encryptProviderSecrets(config: PlatformCrawlConfig): PlatformCrawlConfig {
+  return {
+    ...config,
+    apify: {
+      ...config.apify,
+      apiToken: encryptSecretValue(config.apify.apiToken),
+    },
+    socialCrawler: {
+      ...config.socialCrawler,
+      apiUrl: encryptSecretValue(config.socialCrawler.apiUrl),
+      apiKey: encryptSecretValue(config.socialCrawler.apiKey),
+    },
+  };
+}
 
 // ─── Legacy Setting keys (giữ cho backward compat) ─────────────────────────
 const settingKeys = [
@@ -131,19 +182,14 @@ export async function getPlatformProviderConfig(
     }
   } catch { /* fallback to default */ }
 
-  if (isMaskedConfigValue(socialCrawler.apiUrl)) {
-    socialCrawler.apiUrl = DEFAULT_SOCIAL_CRAWLER_CONFIG.apiUrl;
-  }
-  if (isMaskedConfigValue(socialCrawler.apiKey)) {
-    socialCrawler.apiKey = DEFAULT_SOCIAL_CRAWLER_CONFIG.apiKey;
-  }
-
-  return {
+  const config = {
     activeProvider: (row.activeProvider as CrawlProvider) ?? "playwright",
     playwright,
     apify,
     socialCrawler,
   };
+
+  return decryptProviderSecrets(config);
 }
 
 /**
@@ -174,6 +220,12 @@ export async function updatePlatformProviderConfig(
     : current.socialCrawler;
 
   const newActiveProvider = update.activeProvider ?? current.activeProvider;
+  const updatedConfig = encryptProviderSecrets({
+    activeProvider: newActiveProvider,
+    playwright: newPlaywright,
+    apify: newApify,
+    socialCrawler: newSocialCrawler,
+  });
 
   await prisma.platformProviderConfig.upsert({
     where: { platform },
@@ -181,14 +233,14 @@ export async function updatePlatformProviderConfig(
       platform,
       activeProvider: newActiveProvider,
       playwrightConfig: JSON.stringify(newPlaywright),
-      apifyConfig: JSON.stringify(newApify),
-      socialCrawlerConfig: JSON.stringify(newSocialCrawler),
+      apifyConfig: JSON.stringify(updatedConfig.apify),
+      socialCrawlerConfig: JSON.stringify(updatedConfig.socialCrawler),
     },
     update: {
       activeProvider: newActiveProvider,
       playwrightConfig: JSON.stringify(newPlaywright),
-      apifyConfig: JSON.stringify(newApify),
-      socialCrawlerConfig: JSON.stringify(newSocialCrawler),
+      apifyConfig: JSON.stringify(updatedConfig.apify),
+      socialCrawlerConfig: JSON.stringify(updatedConfig.socialCrawler),
     },
   });
 
@@ -234,31 +286,63 @@ export async function getPublicSettings(): Promise<PublicSettings> {
   const fbEmail = settings.get("facebookEmail")?.trim() || (await getConfig("fb_email")) || "";
   const fbPassword = settings.get("facebookPassword")?.trim() || (await getConfig("fb_password")) || "";
 
-  // ─── Social Crawler: load từ encrypted Setting table ────────
-  const scApiUrlRaw = await getConfig("social_crawler_api_url");
-  const scApiKeyRaw = await getConfig("social_crawler_api_key");
-  const scApiUrl = isMaskedConfigValue(scApiUrlRaw) ? undefined : scApiUrlRaw;
-  const scApiKey = isMaskedConfigValue(scApiKeyRaw) ? undefined : scApiKeyRaw;
-  const scMaxItems = await getConfig("social_crawler_max_items");
-  const scTimeoutSecs = await getConfig("social_crawler_timeout_secs");
+  // Backward compat: read legacy Social Crawler config from old config storage if present.
+  const legacyKeys = [
+    "config_social_crawler_api_url_tiktok",
+    "config_social_crawler_api_key_tiktok",
+    "config_social_crawler_api_url_facebook",
+    "config_social_crawler_api_key_facebook",
+    "config_social_crawler_max_items",
+    "config_social_crawler_timeout_secs",
+    "config_social_crawler_api_url",
+    "config_social_crawler_api_key",
+  ];
 
-  // Merge encrypted values into provider socialCrawler config (override PlatformProviderConfig)
-  if (scApiUrl || scApiKey) {
-    const socialCrawlerOverride = {
-      ...(scApiUrl ? { apiUrl: scApiUrl } : {}),
-      ...(scApiKey ? { apiKey: scApiKey } : {}),
-      ...(scMaxItems ? { maxItems: parseInt(scMaxItems, 10) } : {}),
-      ...(scTimeoutSecs ? { timeoutSecs: parseInt(scTimeoutSecs, 10) } : {}),
-    };
-    tiktokProvider.socialCrawler = {
-      ...tiktokProvider.socialCrawler,
-      ...socialCrawlerOverride,
-    };
-    facebookProvider.socialCrawler = {
-      ...facebookProvider.socialCrawler,
-      ...socialCrawlerOverride,
-    };
+  const legacyRows = await prisma.setting.findMany({ where: { key: { in: legacyKeys } } });
+  const legacyMap: Record<string, string> = {};
+  for (const row of legacyRows) {
+    try {
+      legacyMap[row.key] = decrypt(row.value);
+    } catch {
+      legacyMap[row.key] = row.value;
+    }
   }
+
+  const legacyUrlTiktok = legacyMap["config_social_crawler_api_url_tiktok"]
+    ?? legacyMap["config_social_crawler_api_url"];
+  const legacyKeyTiktok = legacyMap["config_social_crawler_api_key_tiktok"]
+    ?? legacyMap["config_social_crawler_api_key"];
+  const legacyUrlFacebook = legacyMap["config_social_crawler_api_url_facebook"]
+    ?? legacyMap["config_social_crawler_api_url"];
+  const legacyKeyFacebook = legacyMap["config_social_crawler_api_key_facebook"]
+    ?? legacyMap["config_social_crawler_api_key"];
+  const legacyMaxItems = legacyMap["config_social_crawler_max_items"];
+  const legacyTimeoutSecs = legacyMap["config_social_crawler_timeout_secs"];
+
+  const resolveLegacySocialCrawler = (platform: "facebook" | "tiktok") => {
+    const platformUrlRaw = platform === "facebook" ? legacyUrlFacebook : legacyUrlTiktok;
+    const platformKeyRaw = platform === "facebook" ? legacyKeyFacebook : legacyKeyTiktok;
+    const url = isMaskedConfigValue(platformUrlRaw) ? undefined : platformUrlRaw;
+    const key = isMaskedConfigValue(platformKeyRaw) ? undefined : platformKeyRaw;
+    return { url, key };
+  };
+
+  const mergeLegacySocialCrawler = (
+    config: SocialCrawlerProviderConfig,
+    legacy: { url?: string; key?: string }
+  ): SocialCrawlerProviderConfig => ({
+    ...config,
+    apiUrl: config.apiUrl || legacy.url || config.apiUrl,
+    apiKey: config.apiKey || legacy.key || config.apiKey,
+    ...(legacyMaxItems ? { maxItems: parseInt(legacyMaxItems, 10) } : {}),
+    ...(legacyTimeoutSecs ? { timeoutSecs: parseInt(legacyTimeoutSecs, 10) } : {}),
+  });
+
+  const tiktokLegacy = resolveLegacySocialCrawler("tiktok");
+  const facebookLegacy = resolveLegacySocialCrawler("facebook");
+
+  tiktokProvider.socialCrawler = mergeLegacySocialCrawler(tiktokProvider.socialCrawler, tiktokLegacy);
+  facebookProvider.socialCrawler = mergeLegacySocialCrawler(facebookProvider.socialCrawler, facebookLegacy);
 
   // Legacy TikTok provider (backward compat với tiktokCrawler.ts)
   const legacyCrawl = parseTikTokCrawlConfig(settings as Map<string, string>);

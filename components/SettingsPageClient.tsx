@@ -212,13 +212,39 @@ function ApiKeysTab({ onMsg }: { onMsg: (m: any) => void }) {
     checkQuota(activeAiProvider);
   }, [loading, items, activeAiProvider]);
 
-  const reload = async () => { const d = await fetch("/api/config").then(r => r.json()); setItems(d.configs ?? []); };
+  const reload = async (key?: string) => {
+    if (key) {
+      const d = await fetch(`/api/config?keys=${encodeURIComponent(key)}`).then(r => r.json());
+      const updatedItem = d.configs?.[0];
+      if (updatedItem) {
+        setItems((prev) => {
+          const idx = prev.findIndex((item) => item.key === updatedItem.key);
+          if (idx >= 0) {
+            const next = [...prev];
+            next[idx] = updatedItem;
+            return next;
+          }
+          return [...prev, updatedItem];
+        });
+      } else {
+        setItems((prev) => prev.filter((item) => item.key !== key));
+      }
+      return;
+    }
+    const d = await fetch("/api/config").then(r => r.json());
+    setItems(d.configs ?? []);
+  };
 
   const save = (key: string) => {
     startTransition(async () => {
       await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save", key, value: editVal }) });
-      setEditing(null); onMsg({ type: "success", text: "✅ Đã lưu" }); await reload();
-      // Refresh quota nếu vừa lưu API key
+      setEditing(null);
+      if (key === "ai_provider") {
+        await reload();
+      } else {
+        await reload(key);
+      }
+      onMsg({ type: "success", text: "✅ Đã lưu" });
       if (key.endsWith("_api_key") || key === "ai_provider") {
         const prov = key === "ai_provider" ? editVal : key.replace("_api_key", "");
         checkQuota(prov, true);
@@ -229,7 +255,9 @@ function ApiKeysTab({ onMsg }: { onMsg: (m: any) => void }) {
   const del = (key: string) => {
     startTransition(async () => {
       await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "delete", key }) });
-      onMsg({ type: "success", text: "✅ Đã xoá" }); await reload();
+      setEditing(null);
+      await reload(key);
+      onMsg({ type: "success", text: "✅ Đã xoá" });
     });
   };
 
@@ -526,36 +554,82 @@ function ApiKeysTab({ onMsg }: { onMsg: (m: any) => void }) {
 
 function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
   const [platform, setPlatform] = useState<"tiktok" | "facebook" | "youtube">("tiktok");
-  const [providers, setProviders] = useState<any>(null);
-  const [configItems, setConfigItems] = useState<any[]>([]);
+  const [providerConfig, setProviderConfig] = useState<any>(null);
   const [socialCrawlerSecretDraft, setSocialCrawlerSecretDraft] = useState({ apiUrl: "", apiKey: "" });
   const [youtubeStatus, setYoutubeStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [pending, startTransition] = useTransition();
-  const fetched = useRef(false);
+  const [showAccountManager, setShowAccountManager] = useState(false);
 
   useEffect(() => {
-    if (fetched.current) return;
-    fetched.current = true;
-    Promise.all([
-      fetch("/api/settings/providers").then(r => r.json()),
-      fetch("/api/config").then(r => r.json()),
-    ]).then(([p, c]) => {
-      setProviders(p);
-      setConfigItems(c.configs ?? []);
-      const apiKey = c.configs?.find((x: any) => x.key === "youtube_api_key");
-      setYoutubeStatus(apiKey);
-    }).finally(() => setLoading(false));
-  }, []);
+    setSocialCrawlerSecretDraft({ apiUrl: "", apiKey: "" });
+  }, [platform]);
 
-  // Helper: lấy giá trị từ config registry (encrypted)
-  const scConfigVal = (key: string) => configItems.find((x: any) => x.key === key);
+  useEffect(() => {
+    let ignore = false;
+    setLoading(true);
 
-  const cfg: any = providers?.[platform === "youtube" ? "tiktok" : platform];
+    const fetchConfig = async () => {
+      if (platform === "youtube") {
+        const configResponse = await fetch("/api/config?keys=youtube_api_key");
+        const configData = await configResponse.json();
+        if (ignore) return;
+        setYoutubeStatus(configData.configs?.find((x: any) => x.key === "youtube_api_key"));
+        setProviderConfig(null);
+      } else {
+        const providerData = await fetch(`/api/settings/providers?platform=${platform}`).then((r) => r.json());
+        if (ignore) return;
+        setProviderConfig(providerData[platform]);
+      }
+    };
+
+    fetchConfig().finally(() => {
+      if (!ignore) setLoading(false);
+    });
+
+    return () => { ignore = true; };
+  }, [platform]);
+
+  const hasSocialCrawlerSecret = Boolean(providerConfig?.socialCrawler?.apiKey || providerConfig?.socialCrawler?.apiUrl);
+
+  const defaultCfg = {
+    activeProvider: "playwright",
+    playwright: {
+      browserEngine: platform === "tiktok" ? "cloakbrowser" : "playwright",
+      headless: false,
+      scrollDelayMin: 2000,
+      scrollDelayMax: 4000,
+    },
+    apify: {
+      apiToken: "",
+      actorId: platform === "tiktok" ? "clockworks/tiktok-scraper" : "apify/facebook-posts-scraper",
+      groupActorId: "",
+      maxItems: 50,
+      timeoutSecs: 120,
+      memoryMbytes: 1024,
+    },
+    socialCrawler: {
+      apiUrl: "",
+      apiKey: "",
+      maxItems: 50,
+      timeoutSecs: 120,
+      facebookMaxPosts: 50,
+      scrollDelayMin: 5000,
+      scrollDelayMax: 9000,
+      scrollStepsMin: 3,
+      scrollStepsMax: 5,
+      interStepDelayMin: 400,
+      interStepDelayMax: 800,
+      maxScrolls: 15,
+      staleLimit: 4,
+      humanScrollChance: 0.7,
+      humanScrollUpChance: 0.3,
+    },
+  };
+  const cfg: any = platform === "youtube" ? null : (providerConfig ?? defaultCfg);
 
   const update = (partial: any) => {
-    const key = platform === "youtube" ? "tiktok" : platform;
-    setProviders((prev: any) => prev ? { ...prev, [key]: { ...prev[key], ...partial } } : prev);
+    setProviderConfig((prev: any) => prev ? { ...prev, ...partial } : prev);
   };
 
   const updateSocialCrawlerSecretDraft = (partial: Partial<typeof socialCrawlerSecretDraft>) => {
@@ -572,8 +646,13 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
     if (!cfg || platform === "youtube") return;
     startTransition(async () => {
       try {
-        // Lưu cấu hình provider (activeProvider, playwright, apify) qua API cũ
-        await ensureSaveOk(await fetch("/api/settings/providers", {
+        const socialCrawlerPayload = {
+          ...cfg.socialCrawler,
+          apiUrl: realSecretValue(socialCrawlerSecretDraft.apiUrl) || cfg.socialCrawler.apiUrl,
+          apiKey: realSecretValue(socialCrawlerSecretDraft.apiKey) || cfg.socialCrawler.apiKey,
+        };
+
+        const response = await fetch("/api/settings/providers", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -581,46 +660,14 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
             activeProvider: cfg.activeProvider,
             playwright: cfg.playwright,
             apify: cfg.apify,
-            // Không gửi socialCrawler.apiUrl + apiKey — chúng được lưu riêng qua config API (mã hoá)
-            socialCrawler: {
-              ...cfg.socialCrawler,
-              apiUrl: undefined,
-              apiKey: undefined,
-            },
+            socialCrawler: socialCrawlerPayload,
           }),
-        }));
+        });
 
-        // Lưu Social Crawler API URL + Key qua config API (mã hoá AES-256-GCM)
-        const scApiUrl = scConfigVal("social_crawler_api_url");
-        const scApiKey = scConfigVal("social_crawler_api_key");
-        const promises: Promise<any>[] = [];
-        const apiUrl = realSecretValue(socialCrawlerSecretDraft.apiUrl).trim();
-        const apiKey = realSecretValue(socialCrawlerSecretDraft.apiKey).trim();
-        if (apiUrl && apiUrl !== scApiUrl?.value) {
-          promises.push(
-            fetch("/api/config", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ action: "save", key: "social_crawler_api_url", value: apiUrl }),
-            }).then(ensureSaveOk)
-          );
-        }
-        if (apiKey && apiKey !== scApiKey?.value) {
-          promises.push(
-            fetch("/api/config", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ action: "save", key: "social_crawler_api_key", value: apiKey }),
-            }).then(ensureSaveOk)
-          );
-        }
-        await Promise.all(promises);
-        if (promises.length > 0) {
-          const d = await fetch("/api/config").then(r => r.json());
-          setConfigItems(d.configs ?? []);
-          setSocialCrawlerSecretDraft({ apiUrl: "", apiKey: "" });
-        }
-
+        await ensureSaveOk(response);
+        const updatedData = await response.json();
+        setProviderConfig(updatedData.config ?? providerConfig);
+        setSocialCrawlerSecretDraft({ apiUrl: "", apiKey: "" });
         onMsg({ type: "success", text: `✅ Đã lưu ${platform}` });
       } catch (err) {
         onMsg({ type: "error", text: err instanceof Error ? err.message : "Không lưu được cấu hình" });
@@ -800,7 +847,7 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
                 </p>
                 <input type="password" value={socialCrawlerSecretDraft.apiUrl}
                   onChange={(e) => updateSocialCrawlerSecretDraft({ apiUrl: e.target.value })}
-                  placeholder={scConfigVal("social_crawler_api_url")?.hasValue ? "••••••••••••" : "https://social-crawler.public.rke.crawl.tmtco.org"}
+                  placeholder={hasSocialCrawlerSecret ? "••••••••••••" : "https://social-crawler.public.rke.crawl.tmtco.org"}
                   className={cn(inp, "font-mono")} />
               </label>
               <label className="block col-span-2">
@@ -810,7 +857,7 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
                 </p>
                 <input type="password" value={socialCrawlerSecretDraft.apiKey}
                   onChange={(e) => updateSocialCrawlerSecretDraft({ apiKey: e.target.value })}
-                  placeholder={scConfigVal("social_crawler_api_key")?.hasValue ? "••••••••" : "Nhập key..."}
+                  placeholder={hasSocialCrawlerSecret ? "••••••••" : "Nhập key..."}
                   className={cn(inp, "font-mono")} />
               </label>
               <label className="block">
@@ -1030,7 +1077,20 @@ function CrawlTab({ onMsg }: { onMsg: (m: any) => void }) {
 
       {/* Account Manager */}
       <div className="xl:col-span-1">
-        {platform === "facebook" ? <FacebookAccountManager /> : <TikTokAccountManager />}
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div>
+            <p className="text-sm font-semibold text-kolia-ink">Quản lý account</p>
+            <p className="text-xs text-slate-500">Chỉ tải khi bạn mở phần này.</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowAccountManager((v) => !v)}
+            className="rounded-lg border border-kolia-line bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-kolia-mint"
+          >
+            {showAccountManager ? "Ẩn" : "Mở"}
+          </button>
+        </div>
+        {showAccountManager && (platform === "facebook" ? <FacebookAccountManager /> : platform === "tiktok" ? <TikTokAccountManager /> : <div className="rounded-lg border border-kolia-line bg-slate-50 p-4 text-sm text-slate-500">Phần account chỉ áp dụng cho TikTok hoặc Facebook.</div>)}
       </div>
     </div>
     </div>
@@ -1437,7 +1497,7 @@ function IntegrationsTab({ onMsg, onNavigateTab }: { onMsg: (m: any) => void; on
   useEffect(() => {
     Promise.all([
       fetch("/api/youtube/auth").then(r => r.json()).catch(() => null),
-      fetch("/api/config").then(r => r.json()).catch(() => ({ configs: [] })),
+      fetch("/api/config?keys=tiktok_access_token,tiktok_open_id,fb_page_id,fb_page_access_token").then(r => r.json()).catch(() => ({ configs: [] })),
     ]).then(([yt, cfg]) => {
       setConfigItems(cfg.configs ?? []);
 

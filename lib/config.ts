@@ -79,11 +79,6 @@ export const CONFIG_REGISTRY: ConfigMeta[] = [
   // ─── Telegram ───────────────────────────────────────────────────
   { key: "telegram_bot_token", label: "Telegram Bot Token", description: "Bot Token từ @BotFather", category: "telegram", encrypted: true, isSecret: true, envFallback: "TELEGRAM_BOT_TOKEN" },
 
-  // ─── Social Crawler (TikTok) ────────────────────────────────────
-  { key: "social_crawler_api_url", label: "Social Crawler API URL", description: "Base URL của social-crawler service (được mã hoá)", category: "tiktok", encrypted: true, isSecret: true, envFallback: null, placeholder: "https://social-crawler.public.rke.crawl.tmtco.org" },
-  { key: "social_crawler_api_key", label: "Social Crawler API Key", description: "API Key cho social-crawler service", category: "tiktok", encrypted: true, isSecret: true, envFallback: null },
-  { key: "social_crawler_max_items", label: "Social Crawler Max Items", description: "Số item tối đa mỗi lần crawl", category: "tiktok", encrypted: false, isSecret: false, envFallback: null, placeholder: "50" },
-  { key: "social_crawler_timeout_secs", label: "Social Crawler Timeout", description: "Timeout (giây) cho request crawl", category: "tiktok", encrypted: false, isSecret: false, envFallback: null, placeholder: "120" },
 
   // ─── General ────────────────────────────────────────────────────
   { key: "youtube_api_base_url", label: "YouTube API Base URL", description: "Custom API base URL (nếu dùng proxy)", category: "general", encrypted: false, isSecret: false, envFallback: null, placeholder: "https://www.googleapis.com/youtube/v3" },
